@@ -78,13 +78,37 @@ func findOfficialClient(explicit string) (bin string, appDir string, err error) 
 		}
 		return matches[0], filepath.Dir(filepath.Dir(matches[0])), nil
 	case "windows":
-		local, e := os.UserCacheDir()
-		if e != nil {
-			return "", "", e
+		// 多路径探测：按常见安装位置顺序搜索
+		candidates := []string{}
+		// 1. %LOCALAPPDATA%\Programs\WorkBuddy*
+		if local, e := os.UserCacheDir(); e == nil {
+			if m, _ := filepath.Glob(filepath.Join(local, "Programs", "WorkBuddy*", "WorkBuddy.exe")); len(m) > 0 {
+				candidates = append(candidates, m...)
+			}
 		}
-		candidates, _ := filepath.Glob(filepath.Join(local, "Programs", "WorkBuddy*", "WorkBuddy.exe"))
+		// 2. %LOCALAPPDATA%\WorkBuddy\WorkBuddy.exe
+		if local, e := os.UserCacheDir(); e == nil {
+			p := filepath.Join(local, "WorkBuddy", "WorkBuddy.exe")
+			if _, e := os.Stat(p); e == nil {
+				candidates = append(candidates, p)
+			}
+		}
+		// 3. %PROGRAMFILES%\WorkBuddy\WorkBuddy.exe
+		if pf := os.Getenv("PROGRAMFILES"); pf != "" {
+			p := filepath.Join(pf, "WorkBuddy", "WorkBuddy.exe")
+			if _, e := os.Stat(p); e == nil {
+				candidates = append(candidates, p)
+			}
+		}
+		// 4. %PROGRAMFILES(X86)%\WorkBuddy\WorkBuddy.exe
+		if pf := os.Getenv("PROGRAMFILES(X86)"); pf != "" {
+			p := filepath.Join(pf, "WorkBuddy", "WorkBuddy.exe")
+			if _, e := os.Stat(p); e == nil {
+				candidates = append(candidates, p)
+			}
+		}
 		if len(candidates) == 0 {
-			return "", "", fmt.Errorf("未找到 WorkBuddy 客户端，可在设置中指定路径")
+			return "", "", fmt.Errorf("未找到 WorkBuddy 客户端（已搜索 Programs、Local、Program Files 等目录），可在设置中指定路径")
 		}
 		return candidates[0], filepath.Dir(candidates[0]), nil
 	default:
@@ -110,6 +134,39 @@ type ClientSwitchPrecheck struct {
 	Warnings         string `json:"warnings,omitempty"`
 }
 
+// parseOfficialAuthForSwitch 专为客户端切换场景解析官方登录文件：
+// 只要能读出 uid 和 realm 即可，不校验 token 是否明文（官方 v5.6+ 的 token 恒为加密信封）。
+func parseOfficialAuthForSwitch(raw []byte) (uid, realm string) {
+	var doc map[string]any
+	if json.Unmarshal(raw, &doc) != nil {
+		return "", ""
+	}
+	// 嵌套形态 {"auth":{...},"account":{...}}
+	if acct, ok := doc["account"].(map[string]any); ok {
+		uid, _ = acct["uid"].(string)
+	}
+	if uid == "" {
+		// 扁平形态兜底
+		uid, _ = doc["uid"].(string)
+	}
+	// realm：显式字段优先，其次按 domain 推断
+	if auth, ok := doc["auth"].(map[string]any); ok {
+		if r, ok := auth["realm"].(string); ok && r != "" {
+			realm = r
+		} else if d, ok := auth["domain"].(string); ok && d != "" {
+			realm = resolveRealm("", d)
+		}
+	}
+	if realm == "" {
+		if r, ok := doc["realm"].(string); ok && r != "" {
+			realm = r
+		} else if d, ok := doc["domain"].(string); ok && d != "" {
+			realm = resolveRealm("", d)
+		}
+	}
+	return uid, realm
+}
+
 // ClientSwitchPrecheck 切换前检查：目标账号、官方登录位状态、客户端探测。
 func (s *Service) ClientSwitchPrecheck(uid string) (*ClientSwitchPrecheck, error) {
 	pre := &ClientSwitchPrecheck{}
@@ -127,10 +184,17 @@ func (s *Service) ClientSwitchPrecheck(uid string) (*ClientSwitchPrecheck, error
 	if raw, err := os.ReadFile(authFile); err == nil {
 		pre.OfficialExists = true
 		pre.CurrentUID = clientSessionUID(raw)
+		// 先用 ParseCredential 完整解析（兼容扁平/嵌套，支持加密信封）
 		if c, perr := ParseCredential(authFile, raw); perr == nil && c != nil {
 			pre.OfficialRealm = c.Realm
 		} else {
-			pre.Warnings = joinWarn(pre.Warnings, "官方登录文件存在但无法解析——为保护现有登录，本次切换将拒绝执行")
+			// ParseCredential 因 token 加密而失败时，退化为轻量解析：只读 uid/realm
+			_, realm := parseOfficialAuthForSwitch(raw)
+			if realm != "" {
+				pre.OfficialRealm = realm
+			} else {
+				pre.Warnings = joinWarn(pre.Warnings, "官方登录文件存在但无法解析——为保护现有登录，本次切换将拒绝执行")
+			}
 		}
 	}
 	// 客户端登出时会留下 <登录位>.logged-out，启动恢复逻辑见到它就直接判未登录，
@@ -404,18 +468,21 @@ func buildOfficialAuthFile(cred *UpstreamCred, nickname string) ([]byte, error) 
 	}
 
 	auth := map[string]any{
-		"accessToken":      cred.AccessToken,
-		"refreshToken":     cred.RefreshToken,
-		"tokenType":        "Bearer",
-		"domain":           cred.Domain,
-		"expiresAt":        expiresMs, // ms
-		"expiresIn":        expiresIn, // sec，剩余秒（≤0 视为已过期）
-		"refreshExpiresIn": refreshLifetimeSec,
-		"refreshExpiresAt": refreshExpMs, // ms
-		"lastRefreshTime":  nowMs,        // ms，官方按当前时间更新
-		"scope":            "openid profile offline_access email",
-		"sessionState":     uuid.NewString(),
-		"notBeforePolicy":  nowSec,
+		"accessToken":       cred.AccessToken,
+		"refreshToken":      cred.RefreshToken,
+		"idToken":           "",            // OIDC 标准字段；无值时留空，避免客户端报登录文件不完整
+		"tokenType":         "Bearer",
+		"domain":            cred.Domain,
+		"expiresAt":         expiresMs,     // ms
+		"expiresIn":         expiresIn,     // sec，剩余秒（≤0 视为已过期）
+		"refreshExpiresIn":  refreshLifetimeSec,
+		"refreshExpiresAt":  refreshExpMs,  // ms
+		"lastRefreshTime":   nowMs,         // ms，官方按当前时间更新
+		"createdAt":         nowMs,         // ms，登录文件创建时间
+		"updatedAt":         nowMs,         // ms，登录文件更新时间
+		"scope":             "openid profile offline_access email",
+		"sessionState":      uuid.NewString(),
+		"notBeforePolicy":   nowSec,
 	}
 
 	account := map[string]any{

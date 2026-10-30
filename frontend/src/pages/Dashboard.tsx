@@ -164,34 +164,49 @@ export default function Dashboard() {
           </div>
         </div>
 
-        <div className="card kpi">
-          <div className="top">
-            <div className="label">
-              <span className="ic" style={{ background: "var(--accent-soft)", color: "var(--accent)" }}>
-                <Coins size={15} strokeWidth={2} />
-              </span>
-              {t("账号积分余额")}
+          <div className="card kpi">
+            <div className="top">
+              <div className="label">
+                <span className="ic" style={{ background: "var(--accent-soft)", color: "var(--accent)" }}>
+                  <Coins size={15} strokeWidth={2} />
+                </span>
+                {t("账号积分余额")}
+              </div>
+            </div>
+            {ov && ov.creditsUnknown > 0 && ov.creditsTotal === 0 ? (
+              <>
+                <div className="val" style={{ color: "var(--text-3)" }}>—</div>
+                <div className="delta down">
+                  {t("{n} 个账号暂无余额来源：本应用未接入上游余额接口", { n: ov.creditsUnknown })}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="val">{ov?.creditsTotal.toLocaleString() ?? 0}</div>
+                <div className="delta up">
+                  {t("{a} 个账号中 {b} 个有真实余额", {
+                    a: ov?.accountsTotal ?? 0,
+                    b: (ov?.accountsTotal ?? 0) - (ov?.creditsUnknown ?? 0),
+                  })}
+                </div>
+              </>
+            )}
+          </div>
+
+          <div className="card kpi">
+            <div className="top">
+              <div className="label">
+                <span className="ic" style={{ background: "var(--red-soft)", color: "var(--red)" }}>
+                  <TimerReset size={15} strokeWidth={2} />
+                </span>
+                {t("积分消耗")}
+              </div>
+            </div>
+            <div className="val">{(ov?.creditsUsedTotal ?? 0).toLocaleString()}</div>
+            <div className="delta up">
+              {t("账号累计已用积分（上游账单口径）")}
             </div>
           </div>
-          {ov && ov.creditsUnknown > 0 && ov.creditsTotal === 0 ? (
-            <>
-              <div className="val" style={{ color: "var(--text-3)" }}>—</div>
-              <div className="delta down">
-                {t("{n} 个账号暂无余额来源：本应用未接入上游余额接口", { n: ov.creditsUnknown })}
-              </div>
-            </>
-          ) : (
-            <>
-              <div className="val">{ov?.creditsTotal.toLocaleString() ?? 0}</div>
-              <div className="delta up">
-                {t("{a} 个账号中 {b} 个有真实余额", {
-                  a: ov?.accountsTotal ?? 0,
-                  b: (ov?.accountsTotal ?? 0) - (ov?.creditsUnknown ?? 0),
-                })}
-              </div>
-            </>
-          )}
-        </div>
       </div>
 
       <div className="dash-grid">

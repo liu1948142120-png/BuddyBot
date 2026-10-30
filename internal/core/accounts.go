@@ -118,10 +118,10 @@ func ParseCredential(file string, raw []byte) (*Credential, error) {
 }
 
 func applyAuthFields(c *Credential, access, refresh encString, expires int64, domain, realm string) {
-	// 加密信封也算「存在」（官方登录文件升级后 token 恒为信封）；
-	// 是否可读用 EncAuth 单独标记，供账号池导入口拒绝。
-	c.HasToken = access.Present && (access.Encrypted || strings.TrimSpace(access.Value) != "")
-	c.HasRefresh = refresh.Present && (refresh.Encrypted || strings.TrimSpace(refresh.Value) != "")
+	// 加密信封虽然"存在"但读不出明文，接入网关/调用上游必然 401
+	// HasToken/HasRefresh 应反映「是否可用于真实调用」，故加密时返回 false
+	c.HasToken = access.Present && !access.Encrypted && strings.TrimSpace(access.Value) != ""
+	c.HasRefresh = refresh.Present && !refresh.Encrypted && strings.TrimSpace(refresh.Value) != ""
 	c.EncAuth = (access.Present && access.Encrypted) || (refresh.Present && refresh.Encrypted)
 	c.ExpiresAt = expires
 	c.Domain = domain

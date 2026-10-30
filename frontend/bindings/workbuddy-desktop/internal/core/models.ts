@@ -379,7 +379,37 @@ export interface Config {
     "inject": InjectConfig;
     "skillhub": SkillHubConfig;
     "plugins": PluginsConfig;
+
+    /**
+     * Ferry 免费额度摆渡（OpenCode 免费模型池接入）配置。
+     */
     "ferry": FerryConfig;
+
+    /**
+     * Upstream 上游服务器地址配置；空字段使用内置默认值。
+     */
+    "upstream": UpstreamConfig;
+
+    /**
+     * UpdateRepo GitHub 更新通道（owner/repo），空表示不检查更新。
+     */
+    "update_repo": string;
+}
+
+/**
+ * FerryConfig 免费额度摆渡（OpenCode 免费模型池接入）配置。
+ */
+export interface FerryConfig {
+    /**
+     * 是否启用（默认 false：启用会下载并托管隔离的 OpenCode 运行时，
+     * 必须由用户明确选择，不做静默下载）。
+     */
+    "enabled": boolean;
+
+    /**
+     * Concurrency 探测并发度（默认 3，上限 6）：上游免费池对并发敏感。
+     */
+    "concurrency": number;
 }
 
 /**
@@ -461,21 +491,6 @@ export interface DataMigrationResult {
 export interface DayModelStat {
     "date": string;
     "byModel": { [_ in string]?: number } | null;
-}
-
-/**
- * FerryConfig 免费额度摆渡（OpenCode 免费模型池接入）配置。
- * 
- * Enabled 默认 false：启用会在数据目录里下载并托管一份隔离的 OpenCode 运行时，
- * 属于必须由用户明确选择的重操作，不做静默下载。
- */
-export interface FerryConfig {
-    "enabled": boolean;
-
-    /**
-     * Concurrency 探测并发度（默认 3，上限 6）：上游免费池对并发敏感
-     */
-    "concurrency": number;
 }
 
 /**
@@ -824,6 +839,11 @@ export interface Overview {
     "accountsOnline": number;
     "keysTotal": number;
     "creditsTotal": number;
+
+    /**
+     * 账号累计已用积分（上游账单 CapacityUsed 口径，非网关代理口径）
+     */
+    "creditsUsedTotal": number;
     "creditsUnknown": number;
     "firstTs": number;
     "lastTs": number;
@@ -1565,6 +1585,23 @@ export interface TrendPoint {
     "cost": number;
     "errors": number;
     "avgLatency": number;
+}
+
+/**
+ * UpstreamConfig 上游服务器地址配置。
+ */
+export interface UpstreamConfig {
+    "base_cn": string;
+    "base_global": string;
+    "billing_cn": string;
+    "billing_global": string;
+
+    /**
+     * ClientVersion 客户端版本号；空值时使用内置默认值（defaultClientVer）。
+     * 当官方客户端升级后服务端拒绝旧版本号时，修改 config.json 里的
+     * upstream.client_version 即可同步，无需重新编译。
+     */
+    "client_version": string;
 }
 
 /**

@@ -25,14 +25,13 @@ var processStart = time.Now()
 // appVersion 应用版本。发布构建时通过 ldflags 注入：
 //
 //	go build -ldflags "-X workbuddy-desktop/internal/api.appVersion=1.1.0"
-var appVersion = "1.0.0"
+var appVersion = "1.0.19"
 
-// updateRepo GitHub 更新通道（owner/repo）。默认指向正式发布仓库；
-// 构建期仍可用 ldflags 覆盖（如指向测试仓库）。为空表示未配置更新通道
-// （CheckUpdate 如实返回不支持，不假装检测）。
+// updateRepo GitHub 更新通道（owner/repo）。默认空字符串表示不启用更新检查；
+// 构建期可用 ldflags 覆盖，或在 config.json 中配置 update_repo 字段。
 //
 //	go build -ldflags "-X workbuddy-desktop/internal/api.updateRepo=owner/repo"
-var updateRepo = "HanoCode/BuddyBot"
+var updateRepo = ""
 
 const updateCheckTimeout = 15 * time.Second
 
@@ -124,13 +123,18 @@ type ghAsset struct {
 // 由用户执行安装——桌面端静默替换自身进程需要平台专属机制，不在本步范围内。
 func (s *SystemAPI) CheckUpdate(ctx context.Context) (*UpdateInfo, error) {
 	out := &UpdateInfo{Supported: false, Current: appVersion}
-	if strings.TrimSpace(updateRepo) == "" {
-		out.Note = "当前构建未配置更新通道（ldflags updateRepo）：如需升级请重新拉取源码构建，或安装发行版安装包。"
+	// 优先使用 ldflags 注入的 updateRepo；若为空则尝试从配置读取
+	repo := strings.TrimSpace(updateRepo)
+	if repo == "" && s.service != nil {
+		repo = strings.TrimSpace(s.service.GetConfig().UpdateRepo)
+	}
+	if repo == "" {
+		out.Note = "当前构建未配置更新通道：如需升级请重新拉取源码构建，或安装发行版安装包。"
 		return out, nil
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		"https://api.github.com/repos/"+updateRepo+"/releases/latest", nil)
+		"https://api.github.com/repos/"+repo+"/releases/latest", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -188,12 +192,16 @@ func (s *SystemAPI) CheckUpdate(ctx context.Context) (*UpdateInfo, error) {
 // 仅允许下载 CheckUpdate 返回的 GitHub Release 直链（防 SSRF / 任意文件写）；
 // 下载过程推送 update:progress 进度事件，完成后按 Release 内 checksums.txt 做 sha256 校验。
 func (s *SystemAPI) DownloadUpdate(ctx context.Context, downloadURL string) (string, error) {
-	if strings.TrimSpace(updateRepo) == "" {
+	repo := strings.TrimSpace(updateRepo)
+	if repo == "" && s.service != nil {
+		repo = strings.TrimSpace(s.service.GetConfig().UpdateRepo)
+	}
+	if repo == "" {
 		return "", fmt.Errorf("当前构建未配置更新通道，无法下载更新")
 	}
 	u, err := url.Parse(downloadURL)
 	if err != nil || u.Host != "github.com" ||
-		!strings.HasPrefix(u.Path, "/"+updateRepo+"/releases/download/") {
+		!strings.HasPrefix(u.Path, "/"+repo+"/releases/download/") {
 		return "", fmt.Errorf("下载地址不在更新通道内，已拒绝")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)

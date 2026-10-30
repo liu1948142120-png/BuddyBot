@@ -96,9 +96,6 @@ const maxHistory = 20
 // defaultRunBudgetMinutes 单轮全池任务默认时间预算（分钟）
 const defaultRunBudgetMinutes = 10
 
-// travelLocationID 派出地点固定 4（古镇客栈）：4 个地点收益/时长区间完全相同。
-const travelLocationID = 4
-
 // cstZone 上游每日重置按自然日 00:00 CST（Asia/Shanghai）。
 var cstZone = time.FixedZone("CST", 8*60*60)
 
@@ -504,8 +501,9 @@ func (s *Scheduler) runBudgetDeadline(start time.Time) time.Time {
 	return start.Add(time.Duration(minutes) * time.Minute)
 }
 
-// expiringSoonWindow token 有效期预警窗口（对齐 workbuddy2api pool.expiring_soon 的 168h 默认值）
-const expiringSoonWindow = 168 * time.Hour
+// expiringSoonWindow token 有效期预警窗口。
+// 微信扫码登录 token 有效期约 7 天，窗口设为 24h 可避免「登录即临期」的频繁刷新风暴。
+const expiringSoonWindow = 24 * time.Hour
 
 // expiringCreditWindow 余额「临期作废」预警窗口：72h 内到期的剩余积分单列展示。
 const expiringCreditWindow = 72 * time.Hour
@@ -644,10 +642,15 @@ func (s *Scheduler) doTravel(a Account) TaskRunDetail {
 			return TaskRunDetail{UID: a.UID, Status: TaskSkipped, Message: "今日已派出过，等待到站"}
 		}
 		// 目的地必须来自 travel/config 清单（伪造 id 会被上游拒 400 invalid request）；
-		// 拉取失败时回退到历史实测可用的固定地点
+		// 拉取失败时回退到 client 缓存的上次成功地点，无缓存则跳过（避免硬编码 ID 失效导致 400）
 		locID, locName, cerr := s.up.TravelConfigLocation(cred)
 		if cerr != nil {
-			locID, locName = travelLocationID, ""
+			// 尝试使用缓存地点
+			locID, locName = s.up.travelLocationCache.id, s.up.travelLocationCache.name
+			if locID <= 0 {
+				return TaskRunDetail{UID: a.UID, Status: TaskSkipped,
+					Message: "旅行目的地获取失败且无缓存，跳过本次派出: " + cerr.Error()}
+			}
 		}
 		name, err := s.up.TravelDepart(cred, locID)
 		if err != nil {
@@ -764,13 +767,24 @@ func (s *Scheduler) doKeepalive(a Account) TaskRunDetail {
 				msg = fmt.Sprintf("本地有效期未到但上游已拒绝（401），token 已自动续期（原剩余 %d 小时为假时钟）", int(left.Hours()))
 				note = s.refreshBalance(a, cred)
 			}
-			if note != "" {
-				msg += "；" + note
-			}
-			if note := s.refreshModels(a, cred); note != "" {
-				msg += "；" + note
-			}
-			return TaskRunDetail{UID: a.UID, Status: TaskSuccess, Message: msg}
+		if note != "" {
+			msg += "；" + note
+		}
+		// token 充足走的是余额探测而非真实刷新；探测未被服务端拒绝鉴权，
+		// 说明当前凭证可用，顺带解除历史遗留的「需重新登录」标记
+		// （否则重新授权后的新凭证要粘到 token 临期才有机会清除）。
+		if !isAuthRejectedMessage(note) {
+			s.svc.Store().MutateAccountState(a.UID, func(st *AccountState) {
+				if st.NeedsRelogin {
+					st.NeedsRelogin = false
+					st.Note = ""
+				}
+			})
+		}
+		if note := s.refreshModels(a, cred); note != "" {
+			msg += "；" + note
+		}
+		return TaskRunDetail{UID: a.UID, Status: TaskSuccess, Message: msg}
 		}
 	}
 	nc, err := s.up.refreshToken(cred)
@@ -931,6 +945,9 @@ func (s *Scheduler) RefreshBalanceNow(uid string) (Account, error) {
 		return Account{}, fmt.Errorf("余额查询失败: %w", err)
 	}
 	s.applyBalance(a.UID, d)
+	// 余额查询成功说明上游接受了当前凭证：顺带解除历史遗留的「需重新登录」
+	// 粘性标记（手动刷新余额按钮因此成为即时自愈入口）。
+	s.svc.Store().ClearRelogin(uid)
 	acc, _ := s.svc.FindAccount(uid)
 	return acc, nil
 }

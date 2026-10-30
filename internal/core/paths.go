@@ -22,9 +22,25 @@ const (
 )
 
 // AppDir 应用数据目录（绝对路径）。
+// 优先顺序：
+//   1. BUDDYBOT_HOME 环境变量（测试/多实例用）
+//   2. 便携模式：exe 同级目录存在 .buddybot 文件夹或 portable 标记文件
+//   3. 用户主目录 ~/.buddybot
 func AppDir() string {
 	if v := strings.TrimSpace(os.Getenv("BUDDYBOT_HOME")); v != "" {
 		return v
+	}
+	// 便携模式：如果 exe 所在目录已有 .buddybot 数据目录，或存在 portable 标记文件
+	if exePath, err := os.Executable(); err == nil && exePath != "" {
+		exeDir := filepath.Dir(exePath)
+		portableDir := filepath.Join(exeDir, appDirName)
+		if st, err := os.Stat(portableDir); err == nil && st.IsDir() {
+			return portableDir
+		}
+		portableFlag := filepath.Join(exeDir, "portable")
+		if _, err := os.Stat(portableFlag); err == nil {
+			return portableDir
+		}
 	}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		return filepath.Join(home, appDirName)

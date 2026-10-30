@@ -179,6 +179,11 @@ export const accountsApi = {
     native();
     return API.AccountsAPI.OpenURL(url);
   },
+  /** 弹出系统打开文件对话框，返回所选路径（空字符串 = 用户取消） */
+  openFileDialog(title: string, filterPattern: string): Promise<string> {
+    native();
+    return API.AccountsAPI.OpenFileDialog(title, filterPattern);
+  },
 };
 
 // ---------- 网关 ----------

@@ -37,25 +37,80 @@ type upstreamClient struct {
 	baseGlobal    string
 	billingCN     string
 	billingGlobal string
+	clientVer     string
 	http          *http.Client
+	// travelLocationCache 缓存上次成功获取的旅行地点，避免上游 config 偶发失败时硬编码 ID 失效
+	travelLocationCache struct {
+		id   int
+		name string
+	}
 }
 
 const (
 	upstreamChatPath    = "/v2/chat/completions"
 	upstreamRefreshPath = "/v2/plugin/auth/token/refresh"
 	upstreamCheckinPath = "/v2/billing/meter/daily-checkin"
-	defaultClientVer    = "5.5.4"
+	defaultClientVer    = "5.8.2"
 	defaultCliVer       = "2.137.1"
 	originRefererCN     = "https://www.codebuddy.cn"
 	originRefererGlobal = "https://www.workbuddy.ai"
 )
 
+// 默认上游配置；Service 初始化时可用 config.json 中的 upstream 字段覆盖。
+var defaultUpstreamConfig = UpstreamConfig{
+	BaseCN:        "https://copilot.tencent.com",
+	BaseGlobal:    "https://www.workbuddy.ai",
+	BillingCN:     "https://www.codebuddy.cn",
+	BillingGlobal: "https://www.workbuddy.ai",
+	ClientVersion: defaultClientVer,
+}
+
+// UpstreamConfig 上游服务器地址配置。
+type UpstreamConfig struct {
+	BaseCN        string `json:"base_cn"`
+	BaseGlobal    string `json:"base_global"`
+	BillingCN     string `json:"billing_cn"`
+	BillingGlobal string `json:"billing_global"`
+	// ClientVersion 客户端版本号；空值时使用内置默认值（defaultClientVer）。
+	// 当官方客户端升级后服务端拒绝旧版本号时，修改 config.json 里的
+	// upstream.client_version 即可同步，无需重新编译。
+	ClientVersion string `json:"client_version"`
+}
+
 func newUpstreamClient() *upstreamClient {
+	return newUpstreamClientWith(&defaultUpstreamConfig)
+}
+
+func newUpstreamClientWith(uc *UpstreamConfig) *upstreamClient {
+	if uc == nil {
+		uc = &defaultUpstreamConfig
+	}
+	baseCN := uc.BaseCN
+	if baseCN == "" {
+		baseCN = defaultUpstreamConfig.BaseCN
+	}
+	baseGlobal := uc.BaseGlobal
+	if baseGlobal == "" {
+		baseGlobal = defaultUpstreamConfig.BaseGlobal
+	}
+	billingCN := uc.BillingCN
+	if billingCN == "" {
+		billingCN = defaultUpstreamConfig.BillingCN
+	}
+	billingGlobal := uc.BillingGlobal
+	if billingGlobal == "" {
+		billingGlobal = defaultUpstreamConfig.BillingGlobal
+	}
+	clientVer := uc.ClientVersion
+	if clientVer == "" {
+		clientVer = defaultClientVer
+	}
 	return &upstreamClient{
-		baseCN:        "https://copilot.tencent.com",
-		baseGlobal:    "https://www.workbuddy.ai",
-		billingCN:     "https://www.codebuddy.cn",
-		billingGlobal: "https://www.workbuddy.ai",
+		baseCN:        baseCN,
+		baseGlobal:    baseGlobal,
+		billingCN:     billingCN,
+		billingGlobal: billingGlobal,
+		clientVer:     clientVer,
 		http: &http.Client{
 			Timeout: 0, // SSE 无总时长上限
 			Transport: &http.Transport{
@@ -272,7 +327,7 @@ func (c *upstreamClient) setChatHeaders(req *http.Request, cred *UpstreamCred) {
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	req.Header.Set("Origin", origin)
 	req.Header.Set("Referer", origin+"/")
-	req.Header.Set("User-Agent", "WorkBuddy/"+defaultClientVer+" "+platform+"/"+defaultClientVer+" CLI/"+defaultCliVer)
+	req.Header.Set("User-Agent", "WorkBuddy/"+c.clientVer+" "+platform+"/"+c.clientVer+" CLI/"+defaultCliVer)
 	req.Header.Set("X-CodeBuddy-Request", "1")
 	req.Header.Set("Accept-Language", lang)
 
@@ -308,7 +363,7 @@ func (c *upstreamClient) setChatHeaders(req *http.Request, cred *UpstreamCred) {
 	req.Header.Set("X-Agent-Purpose", "conversation")
 	req.Header.Set("X-IDE-Name", "WorkBuddy")
 	req.Header.Set("X-IDE-Type", "WorkBuddy")
-	req.Header.Set("X-IDE-Version", defaultClientVer)
+	req.Header.Set("X-IDE-Version", c.clientVer)
 	req.Header.Set("X-Product", "WorkBuddy")
 	// 设备风控头：仅当凭证带 device_token 时注入
 	if cred.DeviceToken != "" {
@@ -840,7 +895,7 @@ func (c *upstreamClient) dailyCheckin(cred *UpstreamCred) (*checkinResult, error
 	req.Header.Set("Authorization", "Bearer "+cred.AccessToken)
 	req.Header.Set("X-CodeBuddy-Request", "1")
 	req.Header.Set("Accept-Language", "zh-CN")
-	req.Header.Set("User-Agent", "WorkBuddy/"+defaultClientVer+" WorkBuddy/"+defaultClientVer+" CLI/"+defaultCliVer)
+	req.Header.Set("User-Agent", "WorkBuddy/"+c.clientVer+" WorkBuddy/"+c.clientVer+" CLI/"+defaultCliVer)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -854,24 +909,40 @@ func (c *upstreamClient) dailyCheckin(cred *UpstreamCred) (*checkinResult, error
 		return nil, fmt.Errorf("读取签到响应失败: %w", err)
 	}
 	body := string(raw)
-	// 重复签到：上游返回 code!=0 +「已签到」文案（实测 10001/14001）→ 如实报已签到
-	if resp.StatusCode >= 400 || strings.Contains(body, "已签到") || strings.Contains(strings.ToLower(body), "already") {
-		if strings.Contains(body, "已签到") || strings.Contains(strings.ToLower(body), "already") {
+
+	// 优先解析 JSON 信封，识别已签到的业务码
+	var env apiEnvelope
+	if json.Unmarshal(raw, &env) == nil {
+		if env.Code != 0 {
+			lowerMsg := strings.ToLower(env.Msg)
+			// 已签到常见业务码：10001/14001 + 文案匹配兜底
+			if env.Code == 10001 || env.Code == 14001 ||
+				strings.Contains(lowerMsg, "已签到") || strings.Contains(lowerMsg, "already") ||
+				strings.Contains(lowerMsg, "checked in") || strings.Contains(lowerMsg, "今日已") {
+				return &checkinResult{Already: true, Message: env.Msg}, nil
+			}
+			return nil, fmt.Errorf("签到被上游拒绝（code=%d）%s", env.Code, truncateBody(raw))
+		}
+		// code==0 时走成功分支
+		msg := env.Msg
+		if msg == "" {
+			msg = truncateBody(raw)
+		}
+		return &checkinResult{Message: msg}, nil
+	}
+
+	// 非信封响应：HTTP 状态码 + 文案匹配兜底
+	if resp.StatusCode >= 400 {
+		lower := strings.ToLower(body)
+		if strings.Contains(body, "已签到") || strings.Contains(lower, "already") ||
+			strings.Contains(lower, "checked in") || strings.Contains(lower, "今日已") {
 			return &checkinResult{Already: true, Message: truncateBody(raw)}, nil
 		}
 		return nil, fmt.Errorf("签到被上游拒绝（%d）%s", resp.StatusCode, truncateBody(raw))
 	}
-	var ok struct {
-		Code int    `json:"code"`
-		Msg  string `json:"msg"`
-		Data any    `json:"data"`
-	}
-	_ = json.Unmarshal(raw, &ok)
-	msg := ok.Msg
-	if msg == "" {
-		msg = truncateBody(raw)
-	}
-	return &checkinResult{Message: msg}, nil
+
+	// 2xx 但无法解析信封：兜底视为成功
+	return &checkinResult{Message: truncateBody(raw)}, nil
 }
 
 // SaveUpstreamCred 把刷新后的 token 原子写回凭证文件。
@@ -989,7 +1060,7 @@ func (c *upstreamClient) setBillingHeaders(req *http.Request, cred *UpstreamCred
 		lang = "en-US"
 	}
 	req.Header.Set("Accept-Language", lang)
-	req.Header.Set("User-Agent", "WorkBuddy/"+defaultClientVer+" WorkBuddy/"+defaultClientVer+" CLI/"+defaultCliVer)
+	req.Header.Set("User-Agent", "WorkBuddy/"+c.clientVer+" WorkBuddy/"+c.clientVer+" CLI/"+defaultCliVer)
 	if cred.UID != "" {
 		req.Header.Set("X-Machine-ID", deriveAccountStableID(cred.UID, "machine"))
 		req.Header.Set("X-Session-ID", deriveAccountStableID(cred.UID, "session"))
@@ -1100,6 +1171,7 @@ func (c *upstreamClient) TravelStatus(cred *UpstreamCred) (*TravelState, error) 
 // TravelConfigLocation 拉取旅行目的地清单（GET travel/config → data.locations[]），
 // 返回 (首个目的地 id, 名称)。官方前端派出发请求时 body 必须携带合法的
 // location_id——空 body / 伪造 id 会被拒 400 "invalid request"（hub PR #21 实测）。
+// 成功获取后会缓存到 client 内，供后续 fallback 使用。
 func (c *upstreamClient) TravelConfigLocation(cred *UpstreamCred) (int, string, error) {
 	data, err := c.growthJSON(cred, http.MethodGet, travelConfigPath, nil)
 	if err != nil {
@@ -1115,6 +1187,8 @@ func (c *upstreamClient) TravelConfigLocation(cred *UpstreamCred) (int, string, 
 		return 0, "", fmt.Errorf("travel/config 响应解析失败")
 	}
 	for _, loc := range resp.Locations {
+		c.travelLocationCache.id = loc.ID
+		c.travelLocationCache.name = loc.Name
 		return loc.ID, loc.Name, nil
 	}
 	return 0, "", fmt.Errorf("travel/config 未返回目的地")
@@ -1166,7 +1240,7 @@ type GrowthTierSpec struct {
 	Tier   string `json:"tier"` // "7d"|"14d"|"28d"
 	Days   int    `json:"days"` // 达标连登天数
 	Credit int    `json:"credit"`
-	Status string `json:"-"` // available / claimed / locked（来自 tier_*_status）
+	Status string `json:"-"`    // available / claimed / locked（来自 tier_*_status）
 }
 
 // GrowthRedemptionStatus 连登奖励兑换状态。

@@ -1543,15 +1543,34 @@ function EnhanceSection() {
             </button>
           </SetItem>
 
-          <SetItem title={t("客户端路径")} desc={t("留空自动探测 /Applications 下 WorkBuddy*.app；企业定制版可手动指定")}>
-            <input
-              className="mini-input"
-              style={{ width: 300 }}
-              placeholder={t("自动探测")}
-              value={injectCfg?.client_path ?? ""}
-              onChange={(e) => setInjectCfg((c) => (c ? { ...c, client_path: e.target.value } : c))}
-              onBlur={(e) => void patchInject({ clientPath: e.target.value })}
-            />
+          <SetItem title={t("客户端路径")} desc={t("留空自动探测；Windows 可手动指定 WorkBuddy.exe 路径，macOS 留空即可")}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input
+                className="mini-input"
+                style={{ width: 300 }}
+                placeholder={t("自动探测")}
+                value={injectCfg?.client_path ?? ""}
+                onChange={(e) => setInjectCfg((c) => (c ? { ...c, client_path: e.target.value } : c))}
+                onBlur={(e) => void patchInject({ clientPath: e.target.value })}
+              />
+              <button
+                className="btn btn-soft sm"
+                onClick={async () => {
+                  try {
+                    const path = await accountsApi.openFileDialog(t("选择 WorkBuddy 客户端"), "*.exe");
+                    if (path) {
+                      setInjectCfg((c) => (c ? { ...c, client_path: path } : c));
+                      await patchInject({ clientPath: path });
+                      toast.success(t("路径已设置"), path);
+                    }
+                  } catch (e) {
+                    toast.error(t("选择失败"), String(e));
+                  }
+                }}
+              >
+                {t("浏览…")}
+              </button>
+            </div>
           </SetItem>
           <SetItem title={t("调试端口")} desc={t("CDP 调试端口，默认 9223（客户端需以该端口重启进入调试模式）")}>
             <input

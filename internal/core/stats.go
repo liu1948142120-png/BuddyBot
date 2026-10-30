@@ -104,11 +104,12 @@ type Overview struct {
 	TodayTokens   int     `json:"todayTokens"`
 	TodayRequests int     `json:"todayRequests"`
 
-	AccountsTotal  int     `json:"accountsTotal"`
-	AccountsOnline int     `json:"accountsOnline"`
-	KeysTotal      int     `json:"keysTotal"`
-	CreditsTotal   float64 `json:"creditsTotal"`
-	CreditsUnknown int     `json:"creditsUnknown"`
+	AccountsTotal      int     `json:"accountsTotal"`
+	AccountsOnline     int     `json:"accountsOnline"`
+	KeysTotal          int     `json:"keysTotal"`
+	CreditsTotal       float64 `json:"creditsTotal"`
+	CreditsUsedTotal   float64 `json:"creditsUsedTotal"` // 账号累计已用积分（上游账单 CapacityUsed 口径，非网关代理口径）
+	CreditsUnknown     int     `json:"creditsUnknown"`
 
 	FirstTS int64 `json:"firstTs"`
 	LastTS  int64 `json:"lastTs"`
@@ -475,11 +476,12 @@ func (s *Stats) overview(in []RequestLog, tasks []TaskLog, r Range, pt PriceTabl
 			if a.Status == "online" {
 				o.AccountsOnline++
 			}
-			if a.CreditsKnown {
-				o.CreditsTotal += a.Credits
-			} else {
-				o.CreditsUnknown++
-			}
+		if a.CreditsKnown {
+			o.CreditsTotal += a.Credits
+			o.CreditsUsedTotal += a.CreditsUsed
+		} else {
+			o.CreditsUnknown++
+		}
 		}
 	}
 	o.KeysTotal = len(s.store.ListKeys())

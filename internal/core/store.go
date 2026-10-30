@@ -186,7 +186,12 @@ func (s *Store) Flush() error {
 	if !s.dirty.CompareAndSwap(true, false) {
 		return nil
 	}
-	return s.save()
+	if err := s.save(); err != nil {
+		// 写盘失败时恢复 dirty，避免数据静默丢失
+		s.dirty.Store(true)
+		return err
+	}
+	return nil
 }
 
 // NewStore 创建存储并加载数据；文件不存在或损坏时以空库启动。
@@ -359,6 +364,22 @@ func (s *Store) PurgeAccountState(uid string) {
 	defer s.mu.Unlock()
 	delete(s.data.AccountStates, uid)
 	s.markDirty()
+}
+
+// ClearRelogin 清除「需重新登录」粘性标记。
+//
+// 触发场景：该账号的凭证被重新落盘（OAuth 重新授权 / 手动导入 / 客户端导入）。
+// 新凭证自带新的 refreshToken，旧的「服务端拒绝 RT」结论不再成立；
+// 若不清除，标记会一直粘到 token 临期触发真实刷新为止（可能数周）。
+// 账号运行态不存在时为无操作——不为导入文件名里解析出的未知 uid 误建状态。
+func (s *Store) ClearRelogin(uid string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if st, ok := s.data.AccountStates[uid]; ok && st != nil && st.NeedsRelogin {
+		st.NeedsRelogin = false
+		st.Note = ""
+		s.markDirty()
+	}
 }
 
 // ---- 密钥 ----

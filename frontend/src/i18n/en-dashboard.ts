@@ -37,6 +37,9 @@ export const en: Record<string, string> = {
   "{n} 个账号暂无余额来源：本应用未接入上游余额接口": "{n} accounts have no balance source: this app is not connected to the upstream balance API",
   "{a} 个账号中 {b} 个有真实余额": "{b} of {a} accounts have real balance",
 
+  "积分消耗": "Credit consumption",
+  "账号累计已用积分（上游账单口径）": "Total credits used across accounts (upstream billing)",
+
   "调用趋势": "Usage trend",
   "近 {d} 天真实请求量与 Token 消耗（无数据的日期按 0 显示）": "Real requests and Token usage over the last {d} days (dates with no data shown as 0)",
   "暂无请求记录": "No requests yet",

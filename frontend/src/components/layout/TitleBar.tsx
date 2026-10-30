@@ -1,4 +1,4 @@
-import { Moon, Search, Sun, RefreshCw, Power, RotateCw, ChevronDown, Settings, CircleArrowUp, Loader2, PanelLeftClose, PanelLeftOpen, Languages, Puzzle, X, Minus, Plus, Download, Github } from "lucide-react";
+import { Moon, Search, Sun, RefreshCw, Power, RotateCw, ChevronDown, Settings, CircleArrowUp, Loader2, PanelLeftClose, PanelLeftOpen, Languages, Puzzle, X, Minus, Plus, Download, Home } from "lucide-react";
 import { Application, Window } from "@wailsio/runtime";
 import { useTheme } from "../../hooks/useTheme";
 import { getCloseBehavior } from "../../hooks/useCloseBehavior";
@@ -17,8 +17,8 @@ interface Props {
   onToggleCollapse: () => void;
 }
 
-// GitHub 项目主页（标题栏图标入口）
-const REPO_URL = "https://github.com/HanoCode/BuddyBot";
+// 项目主页（标题栏图标入口）；留空则不显示主页图标
+const HOME_URL = "https://sq.jyy01.cn/h5";
 
 export default function TitleBar({ collapsed, onToggleCollapse }: Props) {
   const [theme, toggleTheme] = useTheme();
@@ -359,13 +359,15 @@ export default function TitleBar({ collapsed, onToggleCollapse }: Props) {
             EN
           </button>
         </div>
-        <button
-          className="icon-btn"
-          data-tip={t("GitHub 项目主页")}
-          onClick={() => void accountsApi.openURL(REPO_URL).catch(() => {})}
-        >
-          <Github size={15} strokeWidth={2} />
-        </button>
+        {HOME_URL && (
+          <button
+            className="icon-btn"
+            data-tip={t("我的主页")}
+            onClick={() => void accountsApi.openURL(HOME_URL).catch(() => {})}
+          >
+            <Home size={15} strokeWidth={2} />
+          </button>
+        )}
         <button
           className={`icon-btn${pathname === "/settings" ? " on" : ""}`}
           data-tip={t("系统设置")}

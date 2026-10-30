@@ -4,6 +4,7 @@ import { Info } from "lucide-react";
 import TitleBar from "./components/layout/TitleBar";
 import Sidebar from "./components/layout/Sidebar";
 import CommandPalette from "./components/layout/CommandPalette";
+import HelpFAB from "./components/common/HelpFAB";
 import { ToastHost, ConfirmHost, PromptHost } from "./components/common/FeedbackUI";
 import { toast } from "./components/common/Feedback";
 import ErrorBoundary from "./components/common/ErrorBoundary";
@@ -100,6 +101,7 @@ export default function App() {
         <ConfirmHost />
         <PromptHost />
         <CommandPalette />
+        <HelpFAB />
       </div>
     </HashRouter>
   );

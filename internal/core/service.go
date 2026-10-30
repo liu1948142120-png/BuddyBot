@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -172,6 +173,10 @@ type Config struct {
 	SkillHub      SkillHubConfig `json:"skillhub"`
 	Plugins       PluginsConfig  `json:"plugins"`
 	Ferry         FerryConfig    `json:"ferry"`
+	// Upstream 上游服务器地址配置；空字段使用内置默认值。
+	Upstream      UpstreamConfig `json:"upstream"`
+	// UpdateRepo GitHub 更新通道（owner/repo），空表示不检查更新。
+	UpdateRepo    string         `json:"update_repo"`
 }
 
 // FerryConfig 免费额度摆渡（OpenCode 免费模型池接入）配置。
@@ -246,6 +251,33 @@ func NewServiceAt(dir string) *Service {
 		awake:      &Awake{},
 	}
 	_ = s.LoadConfig()
+
+	// 同步配置中的上游地址到全局默认值，使所有 newUpstreamClient() 调用自动使用配置地址
+	cfg := s.GetConfig()
+	if cfg.Upstream.BaseCN != "" {
+		defaultUpstreamConfig.BaseCN = cfg.Upstream.BaseCN
+	}
+	if cfg.Upstream.BaseGlobal != "" {
+		defaultUpstreamConfig.BaseGlobal = cfg.Upstream.BaseGlobal
+	}
+	if cfg.Upstream.BillingCN != "" {
+		defaultUpstreamConfig.BillingCN = cfg.Upstream.BillingCN
+	}
+	if cfg.Upstream.BillingGlobal != "" {
+		defaultUpstreamConfig.BillingGlobal = cfg.Upstream.BillingGlobal
+	}
+	if cfg.Upstream.ClientVersion != "" {
+		defaultUpstreamConfig.ClientVersion = cfg.Upstream.ClientVersion
+	}
+
+	// 零配置：自动扫描并导入官方客户端凭证
+	if imp := autoImportClientCredentials(s); imp.Imported > 0 {
+		EmitEvent(EventGatewayLog, map[string]any{
+			"level":   "info",
+			"message": fmt.Sprintf("自动导入 %d 个官方客户端凭证", imp.Imported),
+		})
+	}
+
 	s.mirror = newRedisMirror()
 	s.mirror.configure(s.GetConfig().Redis)
 	s.gateway = NewGateway(s)
@@ -296,6 +328,15 @@ func DefaultConfig() *Config {
 		SkillHub:      SkillHubConfig{CacheTTLMinutes: DefaultSkillHubCacheTTLMinutes},
 		Plugins:       PluginsConfig{RulesText: DefaultRulesText(), SafetyAllowlist: DefaultSafetyAllowlist()},
 		Ferry:         FerryConfig{Enabled: false, Concurrency: DefaultFerryConcurrency},
+		// 自定义更新通道：分发出去的副本默认来此拉取更新（可被 config.json 的 update_repo 覆盖）
+		UpdateRepo: "liu1948142120-png/BuddyBot-Portable",
+		Upstream: UpstreamConfig{
+			BaseCN:        "https://copilot.tencent.com",
+			BaseGlobal:    "https://www.workbuddy.ai",
+			BillingCN:     "https://www.codebuddy.cn",
+			BillingGlobal: "https://www.workbuddy.ai",
+			ClientVersion: defaultClientVer,
+		},
 	}
 }
 
@@ -321,6 +362,19 @@ func (s *Service) Start(ctx context.Context) {
 	if err := s.gateway.Start(cfg.Listen); err != nil {
 		EmitEvent(EventGatewayLog, map[string]any{"level": "error", "message": err.Error()})
 	}
+
+	// 零配置：首次启动无账号时，广播事件引导前端弹出登录窗口
+	if needsSetup(s) {
+		EmitEvent(EventGatewayLog, map[string]any{
+			"level":   "warn",
+			"message": "未检测到有效账号，请点击「账号管理」→「扫码登录」完成授权",
+		})
+		EmitEvent(EventAppError, map[string]any{
+			"scope":   "setup",
+			"message": "首次使用，请完成至少一个账号的授权登录",
+		})
+	}
+
 	s.scheduler.Start(runCtx)
 }
 

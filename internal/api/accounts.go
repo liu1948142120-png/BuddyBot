@@ -324,6 +324,9 @@ func (a *AccountsAPI) PollOAuth(ctx context.Context, region string, globalRegion
 	a.mu.Lock()
 	delete(a.logins, region)
 	a.mu.Unlock()
+	// 重新授权落盘即清除旧的「需重新登录」粘性标记：新凭证自带新 refreshToken，
+	// 旧的「服务端拒绝 RT」结论不再成立（否则标记会粘到 token 临期为止）。
+	a.service.Store().ClearRelogin(poll.Cred.UID)
 	core.EmitEvent(core.EventAccountStatus, map[string]any{
 		"uid": poll.Cred.UID, "status": "online", "credential": name,
 	})
@@ -421,6 +424,8 @@ func (a *AccountsAPI) ImportClientSession(ctx context.Context) (*ImportResult, e
 		return nil, err
 	}
 	audit(a.service, "account.import_client_session", sess.UID, "from="+sess.CredFile)
+	// 凭证（重新）落盘即清除「需重新登录」粘性标记，理由同 PollOAuth。
+	a.service.Store().ClearRelogin(sess.UID)
 	core.EmitEvent(core.EventAccountStatus, map[string]any{
 		"uid": sess.UID, "status": "imported", "credential": file,
 	})
@@ -436,6 +441,18 @@ type ImportResult struct {
 	Files   []string `json:"files"`
 	Skipped []string `json:"skipped"`
 	AuthDir string   `json:"authDir"`
+}
+
+// clearReloginByFiles 按导入成功的凭证文件名清除「需重新登录」粘性标记。
+// 文件名形如 workbuddy-<uid>.json；非 uid 形态的历史文件名（如时间戳名）解析出的
+// 字符串在 Store 里没有对应运行态，ClearRelogin 会安全无操作。
+func (a *AccountsAPI) clearReloginByFiles(files []string) {
+	for _, f := range files {
+		base := strings.TrimSuffix(filepath.Base(f), ".json")
+		if uid := strings.TrimPrefix(base, "workbuddy-"); uid != "" && uid != base {
+			a.service.Store().ClearRelogin(uid)
+		}
+	}
 }
 
 // ImportCredentials 导入凭证内容到 auth_dir；支持单个对象或对象数组，
@@ -477,6 +494,7 @@ func (a *AccountsAPI) ImportCredentials(ctx context.Context, fileName string, co
 			res.Files = append(res.Files, f)
 		}
 		res.AuthDir = core.ResolveAuthDir(dir)
+		a.clearReloginByFiles(res.Files)
 		audit(a.service, "account.import", fileName, fmt.Sprintf("解密导入 %d 个，跳过 %d 个", len(res.Files), len(res.Skipped)))
 		core.EmitEvent(core.EventAccountStatus, map[string]any{"uid": "*", "status": "imported", "count": len(res.Files)})
 		return res, nil
@@ -503,6 +521,7 @@ func (a *AccountsAPI) ImportCredentials(ctx context.Context, fileName string, co
 		res.Files = append(res.Files, f)
 	}
 	res.AuthDir = core.ResolveAuthDir(dir)
+	a.clearReloginByFiles(res.Files)
 	audit(a.service, "account.import", fileName, fmt.Sprintf("导入 %d 个，跳过 %d 个", len(res.Files), len(res.Skipped)))
 	core.EmitEvent(core.EventAccountStatus, map[string]any{"uid": "*", "status": "imported", "count": len(res.Files)})
 	return res, nil
@@ -609,6 +628,27 @@ func (a *AccountsAPI) OpenURL(ctx context.Context, url string) error {
 		return nil
 	}
 	return fmt.Errorf("应用未就绪")
+}
+
+// OpenFileDialog 弹出系统原生「打开文件」对话框，供前端选择客户端路径。
+// filterPattern 如 "*.exe"，title 为对话框标题；用户取消时返回 ""。
+func (a *AccountsAPI) OpenFileDialog(ctx context.Context, title string, filterPattern string) (string, error) {
+	app := application.Get()
+	if app == nil {
+		return "", fmt.Errorf("应用未就绪")
+	}
+	d := app.Dialog.OpenFile()
+	if title != "" {
+		d.SetTitle(title)
+	}
+	if filterPattern != "" {
+		d.AddFilter("可执行文件", filterPattern)
+	}
+	path, err := d.PromptForSingleSelection()
+	if err != nil {
+		return "", fmt.Errorf("打开文件对话框失败: %w", err)
+	}
+	return path, nil // "" = 用户取消
 }
 
 func baseName(name string) string {

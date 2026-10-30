@@ -95,6 +95,14 @@ export function OpenAuthDir(): $CancellablePromise<string> {
 }
 
 /**
+ * OpenFileDialog 弹出系统原生「打开文件」对话框，供前端选择客户端路径。
+ * filterPattern 如 "*.exe"，title 为对话框标题；用户取消时返回 ""。
+ */
+export function OpenFileDialog(title: string, filterPattern: string): $CancellablePromise<string> {
+    return $Call.ByID(3281146658, title, filterPattern);
+}
+
+/**
  * OpenLoginWindow 在应用内开一个 WebView 窗口加载官方授权页：手机号+短信登录
  * 可以完全在应用内完成，不碰系统浏览器（state 轮询与登录页面互相独立，不受影响）。
  * 只允许打开当前会话签发的 authUrl，不接受前端传任意 URL。

@@ -75,5 +75,6 @@ export type {
     TaskStat,
     ThemeConfig,
     TrendPoint,
+    UpstreamConfig,
     UserFootprint
 } from "./models.js";
