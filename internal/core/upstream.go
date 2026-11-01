@@ -1512,6 +1512,11 @@ var pkgEndZone = time.FixedZone("CST", 8*60*60)
 // FetchBalanceDetail 查询余额细分：聚合套餐剩余/已用/总量/包数，并把 soon 窗口内
 // 到期的剩余单列为 Expiring（临期作废预警）。global 账号先打无 /v2 路径（404 回退
 // /v2），CN 固定 /v2（对齐 billingMeterPaths）。
+//
+// 注意：不要传 PackageEndTimeRangeBegin/End 服务端过滤——实测（2026-11-01）该过滤
+// 会在服务端按非 CycleEndTime 的字段（疑似 DeductionEndTime）比较，把到期在范围内
+// 的有效套餐也排除掉（例：500 分、2026-11-30 到期的包被 365 天窗口误删）。这里改为
+// 不带时间过滤拉全量，过期包在本地按 CycleEndTime 剔除。
 func (c *upstreamClient) FetchBalanceDetail(cred *UpstreamCred, soon time.Duration) (*BalanceDetail, error) {
 	paths := []string{meterResourcePath}
 	if cred.Realm == "global" {
@@ -1520,8 +1525,6 @@ func (c *upstreamClient) FetchBalanceDetail(cred *UpstreamCred, soon time.Durati
 	now := time.Now()
 	body := map[string]any{
 		"PageNumber": 1, "PageSize": 100, "ProductCode": "p_tcaca", "Status": []int{0, 3},
-		"PackageEndTimeRangeBegin": now.In(pkgEndZone).Format(packageEndLayout),
-		"PackageEndTimeRangeEnd":   now.In(pkgEndZone).Add(365 * 24 * time.Hour).Format(packageEndLayout),
 	}
 	var lastErr error
 	for i, p := range paths {
@@ -1560,6 +1563,12 @@ func (c *upstreamClient) FetchBalanceDetail(cred *UpstreamCred, soon time.Durati
 			r := pack.CapacityRemain
 			if r < 0 {
 				r = 0
+			}
+			// 已过期套餐本地剔除（服务端不再做时间过滤，防御性兜底）
+			if r > 0 && pack.CycleEndTime != "" {
+				if end, perr := time.ParseInLocation(packageEndLayout, pack.CycleEndTime, pkgEndZone); perr == nil && !end.After(now) {
+					continue
+				}
 			}
 			d.Remain += float64(r)
 			d.Used += float64(pack.CapacityUsed)
