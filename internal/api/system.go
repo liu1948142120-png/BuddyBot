@@ -25,7 +25,7 @@ var processStart = time.Now()
 // appVersion 应用版本。发布构建时通过 ldflags 注入：
 //
 //	go build -ldflags "-X workbuddy-desktop/internal/api.appVersion=1.1.0"
-var appVersion = "1.0.21"
+var appVersion = "1.0.22"
 
 // updateRepo GitHub 更新通道（owner/repo）。默认空字符串表示不启用更新检查；
 // 构建期可用 ldflags 覆盖，或在 config.json 中配置 update_repo 字段。
@@ -34,6 +34,19 @@ var appVersion = "1.0.21"
 var updateRepo = ""
 
 const updateCheckTimeout = 15 * time.Second
+
+// updateChannel 返回生效的更新通道（owner/repo）：构建期 ldflags 注入优先，
+// 其次回退到 config.json 的 update_repo 字段。所有更新相关入口必须经此取值，
+// 避免部分路径只看 ldflags 导致「检查得到新版本却安装不了」的不一致。
+func (s *SystemAPI) updateChannel() string {
+	if r := strings.TrimSpace(updateRepo); r != "" {
+		return r
+	}
+	if s.service != nil {
+		return strings.TrimSpace(s.service.GetConfig().UpdateRepo)
+	}
+	return ""
+}
 
 // SystemAPI 系统信息API
 type SystemAPI struct {
@@ -123,11 +136,7 @@ type ghAsset struct {
 // 由用户执行安装——桌面端静默替换自身进程需要平台专属机制，不在本步范围内。
 func (s *SystemAPI) CheckUpdate(ctx context.Context) (*UpdateInfo, error) {
 	out := &UpdateInfo{Supported: false, Current: appVersion}
-	// 优先使用 ldflags 注入的 updateRepo；若为空则尝试从配置读取
-	repo := strings.TrimSpace(updateRepo)
-	if repo == "" && s.service != nil {
-		repo = strings.TrimSpace(s.service.GetConfig().UpdateRepo)
-	}
+	repo := s.updateChannel()
 	if repo == "" {
 		out.Note = "当前构建未配置更新通道：如需升级请重新拉取源码构建，或安装发行版安装包。"
 		return out, nil
@@ -192,10 +201,7 @@ func (s *SystemAPI) CheckUpdate(ctx context.Context) (*UpdateInfo, error) {
 // 仅允许下载 CheckUpdate 返回的 GitHub Release 直链（防 SSRF / 任意文件写）；
 // 下载过程推送 update:progress 进度事件，完成后按 Release 内 checksums.txt 做 sha256 校验。
 func (s *SystemAPI) DownloadUpdate(ctx context.Context, downloadURL string) (string, error) {
-	repo := strings.TrimSpace(updateRepo)
-	if repo == "" && s.service != nil {
-		repo = strings.TrimSpace(s.service.GetConfig().UpdateRepo)
-	}
+	repo := s.updateChannel()
 	if repo == "" {
 		return "", fmt.Errorf("当前构建未配置更新通道，无法下载更新")
 	}
@@ -271,7 +277,7 @@ func (s *SystemAPI) DownloadUpdate(ctx context.Context, downloadURL string) (str
 	})
 
 	// sha256 校验：与 Release 内 checksums.txt 比对；旧版本发布没有该文件时跳过
-	if expect, ok := fetchChecksum(u.Path); ok {
+	if expect, ok := fetchChecksum(repo, u.Path); ok {
 		if !strings.EqualFold(expect, hex.EncodeToString(hash.Sum(nil))) {
 			_ = os.Remove(dst)
 			return "", fmt.Errorf("校验失败：安装包 sha256 与发布清单不符")
@@ -285,9 +291,9 @@ func (s *SystemAPI) DownloadUpdate(ctx context.Context, downloadURL string) (str
 
 // fetchChecksum 从同通道下载 checksums.txt 并返回 filename 对应的 sha256。
 // checksums.txt 与安装包同目录：/releases/download/<tag>/checksums.txt。
-func fetchChecksum(assetPath string) (string, bool) {
+func fetchChecksum(repo, assetPath string) (string, bool) {
 	base := strings.TrimSuffix(assetPath, "/"+filepath.Base(assetPath))
-	sumURL := "https://github.com/" + updateRepo + base + "/checksums.txt"
+	sumURL := "https://github.com/" + repo + base + "/checksums.txt"
 	req, err := http.NewRequest(http.MethodGet, sumURL, nil)
 	if err != nil {
 		return "", false

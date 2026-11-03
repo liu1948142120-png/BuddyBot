@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"strings"
 	"time"
 
 	"workbuddy-desktop/internal/core"
@@ -21,7 +20,7 @@ func (s *SystemAPI) startUpdateScheduler() {
 	go func() {
 		time.Sleep(updateCheckStartupDelay)
 		for {
-			if strings.TrimSpace(updateRepo) != "" {
+			if s.updateChannel() != "" {
 				// CheckUpdate 内部已做超时与错误处理；失败静默，下个周期重试
 				if info, err := s.CheckUpdate(context.Background()); err == nil && info.HasUpdate {
 					core.EmitEvent(core.EventUpdateAvailable, info)

@@ -18,7 +18,7 @@ import (
 // 随后退出应用并由平台专属机制完成替换/重启。仅接受更新缓存目录内的文件，
 // 防止任意路径执行。
 func (s *SystemAPI) InstallUpdate(ctx context.Context, filePath string) error {
-	if strings.TrimSpace(updateRepo) == "" {
+	if s.updateChannel() == "" {
 		return fmt.Errorf("当前构建未配置更新通道，无法自动安装")
 	}
 	cacheDir, err := updateCacheDir()
