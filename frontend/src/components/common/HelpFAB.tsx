@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { MessageCircle, X, Copy, Check, ExternalLink } from "lucide-react";
+import { MessageCircle, X, Copy, Check, ExternalLink, BookOpen } from "lucide-react";
 import { accountsApi } from "../../services/api";
 import { toast } from "../common/Feedback";
 import { useT } from "../../i18n";
@@ -104,6 +104,10 @@ export default function HelpFAB() {
             </div>
           </div>
           <div className="help-card-foot">
+            <a className="help-home-btn" href="#/help" onClick={() => setOpen(false)}>
+              <BookOpen size={12} strokeWidth={2.4} />
+              {t("查看手册")}
+            </a>
             <button className="help-home-btn" onClick={openHome}>
               <ExternalLink size={12} strokeWidth={2.4} />
               {t("访问主页")}

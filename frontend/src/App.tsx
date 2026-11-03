@@ -23,6 +23,7 @@ import Prompts from "./pages/Prompts";
 import Keys from "./pages/Keys";
 import Chat from "./pages/Chat";
 import Logs from "./pages/Logs";
+import Help from "./pages/Help";
 import Settings from "./pages/Settings";
 
 function AnimatedRoutes() {
@@ -42,6 +43,7 @@ function AnimatedRoutes() {
         <Route path="/keys" element={<Keys />} />
         <Route path="/chat" element={<Chat />} />
         <Route path="/logs" element={<Logs />} />
+        <Route path="/help" element={<Help />} />
         <Route path="/settings" element={<Settings />} />
       </Routes>
     </div>

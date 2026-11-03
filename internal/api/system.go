@@ -25,7 +25,7 @@ var processStart = time.Now()
 // appVersion 应用版本。发布构建时通过 ldflags 注入：
 //
 //	go build -ldflags "-X workbuddy-desktop/internal/api.appVersion=1.1.0"
-var appVersion = "1.0.19"
+var appVersion = "1.0.21"
 
 // updateRepo GitHub 更新通道（owner/repo）。默认空字符串表示不启用更新检查；
 // 构建期可用 ldflags 覆盖，或在 config.json 中配置 update_repo 字段。
