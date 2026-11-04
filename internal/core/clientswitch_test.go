@@ -460,3 +460,105 @@ func TestCloneClientSessionsAt_Noop(t *testing.T) {
 		t.Fatal("缺 projects/ 时应明确报错")
 	}
 }
+
+// 8. verify 失败后的自动回滚：备份存在时写回原文，备份为空时删除写入的文件；
+//    两种情况都要清掉登出标记（切换流程 3.2 已清理过，回滚不得残留）。
+func TestRollbackOfficialAuth(t *testing.T) {
+	dir := t.TempDir()
+	authFile := filepath.Join(dir, "workbuddy-desktop.info")
+	marker := officialAuthLogoutMarker(authFile)
+
+	// 场景 1：有备份 → 写回备份原文并清标记
+	if err := os.WriteFile(authFile, []byte(`{"auth":{"accessToken":"at-dead"},"account":{"uid":"u-target"}}`), 0o600); err != nil {
+		t.Fatalf("写入登录文件失败: %v", err)
+	}
+	if err := os.WriteFile(marker, []byte("tok"), 0o600); err != nil {
+		t.Fatalf("写入登出标记失败: %v", err)
+	}
+	backup := filepath.Join(dir, "backup.info")
+	if err := os.WriteFile(backup, []byte(`{"auth":{"accessToken":"at-good"},"account":{"uid":"u-prev"}}`), 0o600); err != nil {
+		t.Fatalf("写入备份失败: %v", err)
+	}
+	if err := rollbackOfficialAuth(authFile, backup); err != nil {
+		t.Fatalf("回滚失败: %v", err)
+	}
+	raw, _ := os.ReadFile(authFile)
+	if !strings.Contains(string(raw), "at-good") {
+		t.Fatalf("应写回备份原文: %s", raw)
+	}
+	if fileExists(marker) {
+		t.Fatal("回滚后登出标记应被清理")
+	}
+
+	// 场景 2：无备份（切换前未登录）→ 删除写入的文件并清标记
+	if err := os.WriteFile(authFile, []byte(`{"auth":{"accessToken":"at-dead"}}`), 0o600); err != nil {
+		t.Fatalf("写入登录文件失败: %v", err)
+	}
+	if err := os.WriteFile(marker, []byte("tok"), 0o600); err != nil {
+		t.Fatalf("写入登出标记失败: %v", err)
+	}
+	if err := rollbackOfficialAuth(authFile, ""); err != nil {
+		t.Fatalf("回滚失败: %v", err)
+	}
+	if fileExists(authFile) || fileExists(marker) {
+		t.Fatal("无备份回滚应删除登录文件并清理标记")
+	}
+
+	// 场景 3：备份文件丢失 → 报错（调用方会把备份目录路径连同错误一起提示）
+	if err := rollbackOfficialAuth(authFile, filepath.Join(dir, "missing.info")); err == nil {
+		t.Fatal("备份丢失应报错")
+	}
+}
+
+// 9. ClientRestoreAuthBackupByName 的防御路径：文件名校验（防路径穿越）、
+//    备份缺失 / 内容无法解析的保护性拒绝。客户端路径显式指向不存在的文件，
+//    让流水线终止在「未找到官方客户端」——全部校验都发生在它之前，且不写真实登录位。
+func TestClientRestoreAuthBackupByName_Guards(t *testing.T) {
+	// 本机存在真实官方登录文件时，跨通道校验可能先于客户端探测触发，断言会失真
+	if authPath, aerr := OfficialClientAuthFile(); aerr == nil && fileExists(authPath) {
+		t.Skip("本机存在真实官方登录文件，跳过（避免真实登录状态干扰断言）")
+	}
+	svc := NewServiceAt(t.TempDir())
+	// GetConfig() 返回副本，直接改内部 config 才能让 findOfficialClient 探测落空，
+	// 保证流水线终止于「未找到官方客户端」，绝不触碰真实客户端与登录位
+	svc.config.Inject.ClientPath = filepath.Join(t.TempDir(), "no-such-electron")
+
+	dir := svc.clientSwitchBackupDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("建备份目录失败: %v", err)
+	}
+	good := `{"auth":{"accessToken":"at-restore","refreshToken":"rt-restore","expiresAt":` +
+		strconv.FormatInt((time.Now().Add(48*time.Hour).Unix())*1000, 10) +
+		`,"domain":"www.codebuddy.cn"},"account":{"uid":"u-restore"}}`
+	if err := os.WriteFile(filepath.Join(dir, "backup-1.info"), []byte(good), 0o600); err != nil {
+		t.Fatalf("写入备份失败: %v", err)
+	}
+	// 非法名称：非 .info / 空白。含路径成分的名称会被 filepath.Base 归一化
+	// （../backup-1.info == backup-1.info，无法逃出备份目录），归一化后单独验证
+	for _, bad := range []string{"backup-1.json", "", "   "} {
+		if err := svc.ClientRestoreAuthBackupByName(bad); err == nil {
+			t.Fatalf("非法备份名应被拒绝: %q", bad)
+		}
+	}
+	// 备份不存在
+	if err := svc.ClientRestoreAuthBackupByName("backup-missing.info"); err == nil {
+		t.Fatal("备份不存在应报错")
+	}
+	// 穿越名归一化后与原名等价：等价于按归一化名读取，不逃出备份目录
+	if err := svc.ClientRestoreAuthBackupByName("../backup-missing.info"); err == nil ||
+		!strings.Contains(err.Error(), "读取备份失败") {
+		t.Fatalf("穿越名应按归一化名读取: %v", err)
+	}
+	// 内容无法解析 → 保护性拒绝
+	if err := os.WriteFile(filepath.Join(dir, "backup-bad.info"), []byte("not-json"), 0o600); err != nil {
+		t.Fatalf("写入坏备份失败: %v", err)
+	}
+	if err := svc.ClientRestoreAuthBackupByName("backup-bad.info"); err == nil || !strings.Contains(err.Error(), "无法解析") {
+		t.Fatalf("坏备份应被保护性拒绝: %v", err)
+	}
+	// 合法备份：应通过全部校验并终止于客户端探测
+	err := svc.ClientRestoreAuthBackupByName("backup-1.info")
+	if err == nil || !strings.Contains(err.Error(), "未找到官方客户端") {
+		t.Fatalf("合法备份应通过校验并终止于客户端探测: %v", err)
+	}
+}

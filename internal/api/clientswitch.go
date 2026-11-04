@@ -32,3 +32,9 @@ func (a *ClientSwitchAPI) Switch(ctx context.Context, uid string) error {
 func (a *ClientSwitchAPI) Backups(ctx context.Context) []map[string]any {
 	return a.service.ClientSwitchBackups()
 }
+
+// Restore 用指定备份（ClientSwitchBackups 返回的 name）恢复官方登录位并重启客户端。
+// 用于切换失败或客户端误登出后，一键回到备份时的登录状态。
+func (a *ClientSwitchAPI) Restore(ctx context.Context, name string) error {
+	return a.service.ClientRestoreAuthBackupByName(name)
+}

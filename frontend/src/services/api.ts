@@ -269,6 +269,11 @@ export const clientSwitchApi = {
   backups(): Promise<Record<string, unknown>[]> {
     return call(() => API.ClientSwitchAPI.Backups() as unknown as Promise<Record<string, unknown>[]>);
   },
+  /** 用指定备份恢复官方登录位并重启客户端（切换失败 / 客户端误登出后一键回滚） */
+  restore(name: string): Promise<void> {
+    native();
+    return API.ClientSwitchAPI.Restore(name);
+  },
 };
 
 // ---------- 账号数据迁移 ----------

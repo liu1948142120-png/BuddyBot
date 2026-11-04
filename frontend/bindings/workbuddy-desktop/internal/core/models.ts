@@ -193,6 +193,21 @@ export interface ClientSwitchPrecheck {
     "clientPath": string;
     "clientRunning": boolean;
     "backupDir": string;
+
+    /**
+     * 官方当前登录 uid（明文，取不到为空）
+     */
+    "currentUid"?: string;
+
+    /**
+     * 存在客户端登出标记（启动时会忽略登录文件）
+     */
+    "logoutMarker": boolean;
+
+    /**
+     * 当前账号可迁移的本地会话数
+     */
+    "localSessions"?: number;
     "warnings"?: string;
 }
 

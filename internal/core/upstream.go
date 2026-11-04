@@ -185,7 +185,19 @@ func upstreamChatRequest(req chatRequest) []byte {
 		msgs = append(msgs, map[string]any{"role": "system", "content": req.System})
 	}
 	for _, m := range req.Messages {
-		msgs = append(msgs, map[string]any{"role": m.Role, "content": m.Content})
+		entry := map[string]any{"role": m.Role, "content": m.Content}
+		// function calling 第二轮消息形态：assistant.tool_calls / tool 结果原样透传
+		//（2026-11-04 探针实测上游接受 OpenAI 标准形态）
+		if len(m.ToolCalls) > 0 && string(m.ToolCalls) != "null" {
+			entry["tool_calls"] = json.RawMessage(m.ToolCalls)
+		}
+		if m.ToolCallID != "" {
+			entry["tool_call_id"] = m.ToolCallID
+		}
+		if m.Name != "" {
+			entry["name"] = m.Name
+		}
+		msgs = append(msgs, entry)
 	}
 	body := map[string]any{
 		"model":          req.Model,
@@ -198,6 +210,13 @@ func upstreamChatRequest(req chatRequest) []byte {
 	}
 	if req.MaxTokens > 0 {
 		body["max_tokens"] = req.MaxTokens
+	}
+	// function calling 参数透传（上游支持，见 tools_probe_test.go 探针结论）
+	if len(req.Tools) > 0 && string(req.Tools) != "null" {
+		body["tools"] = json.RawMessage(req.Tools)
+	}
+	if len(req.ToolChoice) > 0 && string(req.ToolChoice) != "null" {
+		body["tool_choice"] = json.RawMessage(req.ToolChoice)
 	}
 	injectThinking(body, "") // defaultEffort 空 → 回退硬编码 high
 	b, _ := json.Marshal(body)

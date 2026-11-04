@@ -254,4 +254,14 @@ export const en: Record<string, string> = {
   "在日志页查看全部": "View all in Logs",
   "仅显示最近 {n} 条，更多请到日志页「积分明细」按账号查看。": "Showing the latest {n} records only; see Logs → Credits earned for more by account.",
   "本轮领取 {n} 分，点击查看该账号的领取明细": "Earned {n} credits this run; click to view this account's details",
+
+  // ===== 官方登录备份（客户端切换自动备份 + 一键恢复） =====
+  "官方登录备份": "Official login backups",
+  "客户端切换时自动备份官方登录文件；客户端被登出或切换失败后，可恢复到备份时的登录": "Official auth file is backed up automatically on client switch; restore a backup if the client gets logged out or a switch fails",
+  "写回该备份并重启客户端": "Write this backup back and restart the client",
+  "恢复": "Restore",
+  "恢复登录备份": "Restore login backup",
+  "将退出官方客户端 → 写回备份 {name} → 清理登出标记 → 重启客户端。当前客户端窗口会被关闭，请先保存工作。": "Quits the official client → writes back backup {name} → clears the logout marker → restarts the client. The client window will be closed; save your work first.",
+  "开始恢复": "Start restore",
+  "恢复完成": "Restore complete",
 };

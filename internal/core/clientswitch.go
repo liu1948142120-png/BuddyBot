@@ -36,6 +36,11 @@ import (
 // EventClientSwitch 客户端切换进度事件（step: backup/stop/write/start/done/error）
 const EventClientSwitch = "clientswitch:progress"
 
+// clientVerifyWaitAfterStart 切换后等客户端启动 + store/refresh 落盘的确认窗口。
+// Electron 冷启动 + 读登录位 + token 刷新/落盘在真实机上可达 ~90s，20s 会过期导致
+// 「假成功」：客户端稍后拒绝凭证并 clean()（写登标记 + 删登录文件）→ 登录随之失效。
+const clientVerifyWaitAfterStart = 90 * time.Second
+
 // OfficialClientAuthFile 官方客户端固定登录位路径（官方唯一实际读取的文件）。
 func OfficialClientAuthFile() (string, error) {
 	switch runtime.GOOS {
@@ -315,21 +320,56 @@ func (s *Service) ClientSwitchAccount(uid string) error {
 		EmitEvent(EventClientSwitch, map[string]any{"step": step, "uid": uid, "message": message})
 	}
 
+	// 0. 强制续期（动客户端之前）：官方客户端以某账号登录期间会自行刷新该账号令牌，新令牌
+	// 只写进它自己的加密登录文件；服务端一刷新，旧一代 token 立即作废，池内副本从此落后
+	// 一代（本地 expiresAt 是「假时钟」，看着没过期其实已被吊销）。不先续期就把池凭证写给
+	// 客户端，客户端启动刷新必 401 → clean() 删登录文件 + 写登出标记，切换必败。
+	// refresh token 被服务端明确拒绝时直接终止：此时客户端、登录位都还没被动过。
+	switchStep("refresh", "刷新账号凭证（写入前先续期，拿到未被客户端侧轮换作废的最新令牌）")
+	cred, err := LoadUpstreamCred(s.AuthDir(), acc.Credential)
+	if err != nil {
+		return fmt.Errorf("读取账号凭证失败: %w", err)
+	}
+	if fresh, rerr := s.gateway.up.refreshToken(cred); rerr == nil {
+		if serr := SaveUpstreamCred(s.AuthDir(), acc.Credential, fresh); serr != nil {
+			return fmt.Errorf("续期后的凭证写回失败: %w", serr)
+		}
+		cred = fresh
+		s.Store().MutateAccountState(uid, func(st *AccountState) {
+			st.LastActivity = Now()
+			st.NeedsRelogin = false
+		})
+	} else if isReloginRequired(rerr) {
+		return fmt.Errorf("账号 %s 的凭证已被轮换作废（refresh token 被服务端拒绝）：" +
+			"该账号在官方客户端登录期间刷新过令牌，池内副本随之失效，请先在 BuddyBot 重新扫码授权该账号", acc.Nickname)
+	} else {
+		// 网络等临时故障不阻断，按现有凭证继续（与旧行为一致）；若凭证确实已死，
+		// verify 阶段会暴露并自动回滚登录位。
+		switchStep("refresh", "凭证自动续期未成功（"+rerr.Error()+"），按现有凭证继续")
+	}
+
 	// 1. 备份官方当前登录文件
 	switchStep("backup", "备份官方当前登录文件")
 	backup := ""
 	if pre.OfficialExists {
-		dir := s.clientSwitchBackupDir()
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return fmt.Errorf("创建备份目录失败: %w", err)
-		}
-		backup = filepath.Join(dir, fmt.Sprintf("backup-%s.info", time.Now().Format("20060102-150405")))
 		raw, err := os.ReadFile(pre.OfficialAuthFile)
 		if err != nil {
-			return fmt.Errorf("读取官方登录文件失败: %w", err)
+			if !os.IsNotExist(err) {
+				return fmt.Errorf("读取官方登录文件失败: %w", err)
+			}
+			// 上次失败的 clean() 或客户端自行登出都可能已删掉登录文件，没有可备份的就跳过
+			switchStep("backup", "官方登录文件已不存在，跳过备份")
+			raw = nil
 		}
-		if err := os.WriteFile(backup, raw, 0o600); err != nil {
-			return fmt.Errorf("写入备份失败: %w", err)
+		if raw != nil {
+			dir := s.clientSwitchBackupDir()
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				return fmt.Errorf("创建备份目录失败: %w", err)
+			}
+			backup = filepath.Join(dir, fmt.Sprintf("backup-%s.info", time.Now().Format("20060102-150405")))
+			if err := os.WriteFile(backup, raw, 0o600); err != nil {
+				return fmt.Errorf("写入备份失败: %w", err)
+			}
 		}
 	}
 
@@ -345,11 +385,8 @@ func (s *Service) ClientSwitchAccount(uid string) error {
 	// 3. 写入目标账号凭证到官方登录位（原子写）
 	// v5.6+ 走嵌套 session（auth/account），凭证保护 off 时 codec 按字符串透传。
 	// 不能直接把池扁平文件塞过去，否则 session.auth?.accessToken 为空、被判定为未登录。
+	// 注意用第 0 步续期后的 cred，而非重新读池文件。
 	switchStep("write", fmt.Sprintf("写入账号 %s 的登录凭证（嵌套 session）", acc.Nickname))
-	cred, err := LoadUpstreamCred(s.AuthDir(), acc.Credential)
-	if err != nil {
-		return fmt.Errorf("读取账号凭证失败: %w", err)
-	}
 	payload, err := buildOfficialAuthFile(cred, acc.Nickname)
 	if err != nil {
 		return fmt.Errorf("构造官方登录文件失败: %w", err)
@@ -398,13 +435,55 @@ func (s *Service) ClientSwitchAccount(uid string) error {
 	// 5. 确认登录真的生效：客户端启动后会自己 store()/refresh()，
 	// 若凭证不被接受（刷新 401），它会立刻 clean() 并重新写登出标记——
 	// 只看「进程起来了」就报成功，正是「写了文件但界面仍未登录」的来源。
+	//
+	// 窗口不能再固定成 20s：Electron 冷启动 + 读登录位 + store/refresh 落盘
+	// 在真实机上经常要 >20s（实测登录态写入后客户端在 ~90s 才落登标记/清理凭证），
+	// 窗口内未看到标记就判定成功会把「切换成功」误报为成功——客户端随后拒绝凭证、
+	// clean() 写登标记并删登录文件，表现为「设置客户端登录 → 失效」。
 	switchStep("verify", "确认客户端登录态")
-	if err := verifyClientSession(pre.OfficialAuthFile, uid, 20*time.Second); err != nil {
-		return fmt.Errorf("登录文件已写入，但客户端启动后仍未登录：%w；备份在 %s", err, s.clientSwitchBackupDir())
+	if err := verifyClientSession(pre.OfficialAuthFile, uid, clientVerifyWaitAfterStart); err != nil {
+		// 回滚：客户端拒绝了写入的凭证并 clean()（删登录文件 + 写登出标记），若把客户端
+		// 留在登出态，用户下次打开就是未登录，且此时登录位已无可再备份的内容。恢复切换前
+		// 的备份（客户端自己刷新过的最新一代令牌）并清掉登出标记，重启后即回到切换前登录。
+		switchStep("verify", "客户端拒绝了写入的凭证，正在回滚到切换前的登录（"+err.Error()+"）")
+		if rberr := rollbackOfficialAuth(pre.OfficialAuthFile, backup); rberr != nil {
+			return fmt.Errorf("登录文件已写入，但客户端启动后仍未登录：%w；自动回滚失败（备份在 %s，可手工恢复）: %w",
+				err, s.clientSwitchBackupDir(), rberr)
+		}
+		_ = startOfficialClient(pre.ClientPath, s.GetConfig().Inject.Port)
+		return fmt.Errorf("登录文件已写入，但客户端启动后仍未登录：%w；已回滚到切换前状态并重启客户端（备份在 %s）",
+			err, s.clientSwitchBackupDir())
 	}
 	switchStep("done", "切换完成，客户端已以 "+acc.Nickname+" 的身份登录")
 	s.Store().Audit("client.switch", uid, "official="+pre.OfficialAuthFile)
 	return nil
+}
+
+// rollbackOfficialAuth 把官方登录位恢复到切换前状态并清掉登出标记，供 verify 失败后
+// 自动回滚（此时客户端已退出、登录位里是刚被拒绝的凭证）：
+//   - backup 非空：写回备份原文（那是客户端自己刷新过的最新一代令牌）；
+//   - backup 为空：切换前本来就没有登录文件，删掉本次写入的即可回到原状。
+//
+// 两种情况都要清登出标记：切换流程 3.2 已把它清掉，回滚后残留会掩盖恢复出的登录。
+func rollbackOfficialAuth(authFile, backup string) error {
+	if backup == "" {
+		if err := os.Remove(authFile); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	} else {
+		raw, err := os.ReadFile(backup)
+		if err != nil {
+			return err
+		}
+		tmp := authFile + ".tmp"
+		if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+			return err
+		}
+		if err := os.Rename(tmp, authFile); err != nil {
+			return err
+		}
+	}
+	return clearLogoutMarker(authFile)
 }
 
 // verifyClientSession 在客户端重启后核对登录态。
@@ -605,11 +684,11 @@ func (s *Service) ClientRestoreAuthBackup(raw []byte) error {
 		EmitEvent(EventClientSwitch, map[string]any{"step": step, "uid": cred.UID, "message": message})
 	}
 	// 官方新版登录文件 nickname 是加密信封，解析后为空，展示兜底 uid
-	name := cred.Nickname
-	if name == "" {
-		name = cred.UID
+	dispName := cred.Nickname
+	if dispName == "" {
+		dispName = cred.UID
 	}
-	switchStep("check", fmt.Sprintf("校验备份账号 %s（%s 版）", name, strings.ToUpper(cred.Realm)))
+	switchStep("check", fmt.Sprintf("校验备份账号 %s（%s 版）", dispName, strings.ToUpper(cred.Realm)))
 
 	// 官方当前登录校验：坏数据拒绝、跨通道拒绝
 	if cur, err := os.ReadFile(authFile); err == nil {
@@ -636,7 +715,7 @@ func (s *Service) ClientRestoreAuthBackup(raw []byte) error {
 	}
 
 	// 原子写入官方登录位
-	switchStep("write", fmt.Sprintf("写入账号 %s 的登录凭证", name))
+	switchStep("write", fmt.Sprintf("写入账号 %s 的登录凭证", dispName))
 	tmp := authFile + ".tmp"
 	if err := os.MkdirAll(filepath.Dir(authFile), 0o700); err != nil {
 		return fmt.Errorf("创建登录目录失败: %w", err)
@@ -657,9 +736,23 @@ func (s *Service) ClientRestoreAuthBackup(raw []byte) error {
 	if err := startOfficialClient(bin, s.GetConfig().Inject.Port); err != nil {
 		return fmt.Errorf("启动客户端失败: %w（登录文件已写入，可手动打开客户端）", err)
 	}
-	switchStep("done", "恢复完成，客户端将以 "+name+" 的身份启动")
+	switchStep("done", "恢复完成，客户端将以 "+dispName+" 的身份启动")
 	s.Store().Audit("client.restore", cred.UID, "official="+authFile)
 	return nil
+}
+
+// ClientRestoreAuthBackupByName 从切换备份目录按文件名恢复（前端「恢复备份」用）。
+// 只接受 ClientSwitchBackups 返回的 backup-*.info 命名，防路径穿越。
+func (s *Service) ClientRestoreAuthBackupByName(name string) error {
+	name = filepath.Base(strings.TrimSpace(name))
+	if name == "" || !strings.HasSuffix(name, ".info") {
+		return fmt.Errorf("备份文件名不合法")
+	}
+	raw, err := os.ReadFile(filepath.Join(s.clientSwitchBackupDir(), name))
+	if err != nil {
+		return fmt.Errorf("读取备份失败: %w", err)
+	}
+	return s.ClientRestoreAuthBackup(raw)
 }
 
 // ClientSwitchBackups 列出切换时的官方登录文件备份

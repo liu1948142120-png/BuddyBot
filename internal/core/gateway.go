@@ -324,19 +324,28 @@ func (g *Gateway) authenticate(w http.ResponseWriter, r *http.Request) (authInfo
 // ---- Chat Completions ----
 
 type chatRequest struct {
-	Model       string        `json:"model"`
-	Messages    []ChatMessage `json:"messages"`
-	Stream      bool          `json:"stream"`
-	Temperature float64       `json:"temperature"`
-	MaxTokens   int           `json:"max_tokens"`
-	System      string        `json:"system"`
-	SessionID   string        `json:"session_id"`
+	Model       string          `json:"model"`
+	Messages    []ChatMessage   `json:"messages"`
+	Stream      bool            `json:"stream"`
+	Temperature float64         `json:"temperature"`
+	MaxTokens   int             `json:"max_tokens"`
+	System      string          `json:"system"`
+	SessionID   string          `json:"session_id"`
+	// Tools/ToolChoice OpenAI function calling 参数，原样透传上游
+	//（上游 /v2/chat/completions 支持，2026-11-04 探针实测两轮工具调用闭环）。
+	Tools      json.RawMessage `json:"tools,omitempty"`
+	ToolChoice json.RawMessage `json:"tool_choice,omitempty"`
 }
 
-// ChatMessage 消息
+// ChatMessage 消息。
+// ToolCalls/ToolCallID/Name 支持 OpenAI function calling 第二轮消息
+// （assistant 携带 tool_calls、tool 角色回传结果），原样透传上游（2026-11-04 实测上游支持）。
 type ChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string          `json:"role"`
+	Content    string          `json:"content"`
+	ToolCalls  json.RawMessage `json:"tool_calls,omitempty"`
+	ToolCallID string          `json:"tool_call_id,omitempty"`
+	Name       string          `json:"name,omitempty"`
 }
 
 // UnmarshalJSON 兼容 OpenAI content 的两种形态：纯字符串与 parts 数组。
@@ -345,13 +354,19 @@ type ChatMessage struct {
 // 数组形态拼接全部 text 段为纯文本（上游按 string 形态转发）；null 视为空串。
 func (m *ChatMessage) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		Role    string          `json:"role"`
-		Content json.RawMessage `json:"content"`
+		Role       string          `json:"role"`
+		Content    json.RawMessage `json:"content"`
+		ToolCalls  json.RawMessage `json:"tool_calls"`
+		ToolCallID string          `json:"tool_call_id"`
+		Name       string          `json:"name"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
 	m.Role = raw.Role
+	m.ToolCalls = raw.ToolCalls
+	m.ToolCallID = raw.ToolCallID
+	m.Name = raw.Name
 	text, err := flattenTextContent(raw.Content)
 	if err != nil {
 		return err
@@ -599,8 +614,10 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 		message := map[string]any{
 			"role": "assistant", "content": content, "reasoning_content": reasoning,
 		}
+		finishReason := "stop"
 		if toolCalls != nil {
 			message["tool_calls"] = toolCalls
+			finishReason = "tool_calls" // agent 客户端依赖该值识别工具调用轮
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"id":      "chatcmpl-" + NewID(""),
@@ -610,7 +627,7 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 			"choices": []any{map[string]any{
 				"index":         0,
 				"message":       message,
-				"finish_reason": "stop",
+				"finish_reason": finishReason,
 			}},
 			"usage": map[string]any{
 				"prompt_tokens": inTokens, "completion_tokens": outTokens,

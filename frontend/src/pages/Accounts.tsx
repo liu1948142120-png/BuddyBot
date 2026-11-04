@@ -96,6 +96,9 @@ export default function Accounts() {
   // 官方客户端当前登录账号探测（账号管理顶部提示条）：登录位 uid + 发现目录可用凭证
   const [clientSess, setClientSess] = useState<ClientSession | null>(null);
   const [sessImporting, setSessImporting] = useState(false);
+  // 官方登录位备份列表（客户端切换时自动生成）：供「恢复备份」一键回滚
+  const [switchBackups, setSwitchBackups] = useState<Record<string, unknown>[]>([]);
+  const [restoring, setRestoring] = useState("");
   const [taskCenter, setTaskCenter] = useState(false);
   // 任务中心实时进度（对齐 panel 队列的逐项可见性）：task:progress 事件驱动
   const [prog, setProg] = useState<null | { type: string; index: number; total: number }>(null);
@@ -695,6 +698,43 @@ export default function Accounts() {
     return off;
   }, []);
 
+  // 官方登录位备份列表：挂载 + 每次切换活动后刷新（新备份生成后立即可恢复）
+  const loadSwitchBackups = useCallback(async () => {
+    try {
+      setSwitchBackups((await clientSwitchApi.backups()) ?? []);
+    } catch {
+      setSwitchBackups([]);
+    }
+  }, []);
+  useEffect(() => {
+    void loadSwitchBackups();
+    const off = onEvent(EVENT.clientSwitch, () => void loadSwitchBackups());
+    return off;
+  }, [loadSwitchBackups]);
+
+  // 恢复官方登录位备份：写回备份原文并重启客户端（切换失败 / 客户端误登出后一键回滚）
+  const restoreSwitchBackup = async (name: string) => {
+    const ok = await confirmDialog({
+      title: t("恢复登录备份"),
+      desc: t(
+        "将退出官方客户端 → 写回备份 {name} → 清理登出标记 → 重启客户端。当前客户端窗口会被关闭，请先保存工作。",
+        { name },
+      ),
+      danger: false,
+      confirmText: t("开始恢复"),
+    });
+    if (!ok) return;
+    setRestoring(name);
+    try {
+      await clientSwitchApi.restore(name);
+      toast.success(t("恢复完成"), t("官方客户端已重启，请在新窗口确认登录状态"));
+    } catch (e) {
+      toast.error(t("恢复失败"), errText(e));
+    } finally {
+      setRestoring("");
+    }
+  };
+
   // 官方客户端当前登录账号探测：挂载 + 账号池变化（导入/扫码/删除都会广播 accountStatus）时刷新
   const refreshClientSess = useCallback(async () => {
     try {
@@ -804,6 +844,46 @@ export default function Accounts() {
                 </button>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* 官方登录位备份（切换时自动生成）：一键恢复到备份时的登录 */}
+      {switchBackups.length > 0 && (
+        <div className="card" style={{ marginBottom: 14 }}>
+          <div className="card-h">
+            <div>
+              <h3>
+                <MonitorSmartphone size={14} strokeWidth={2} style={{ verticalAlign: "-2px", marginRight: 6 }} />
+                {t("官方登录备份")}
+              </h3>
+              <div className="sub">{t("客户端切换时自动备份官方登录文件；客户端被登出或切换失败后，可恢复到备份时的登录")}</div>
+            </div>
+          </div>
+          <div className="card-b" style={{ maxHeight: 200, overflow: "auto" }}>
+            {switchBackups.map((b) => {
+              const name = String(b.name ?? "");
+              return (
+                <div
+                  key={name}
+                  style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "6px 0" }}
+                >
+                  <span style={{ fontSize: 12 }}>
+                    {String(b.time ?? name)}
+                    <span className="sub" style={{ marginLeft: 8 }}>{name}</span>
+                  </span>
+                  <button
+                    className="btn btn-soft"
+                    disabled={restoring !== ""}
+                    data-tip={t("写回该备份并重启客户端")}
+                    onClick={() => void restoreSwitchBackup(name)}
+                  >
+                    {restoring === name ? <Loader2 size={13} className="spin" /> : <Upload size={13} strokeWidth={2} />}
+                    {t("恢复")}
+                  </button>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}

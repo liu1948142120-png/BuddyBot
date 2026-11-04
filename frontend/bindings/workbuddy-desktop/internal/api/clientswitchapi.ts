@@ -30,6 +30,14 @@ export function Precheck(uid: string): $CancellablePromise<core$0.ClientSwitchPr
 }
 
 /**
+ * Restore 用指定备份（ClientSwitchBackups 返回的 name）恢复官方登录位并重启客户端。
+ * 用于切换失败或客户端误登出后，一键回到备份时的登录状态。
+ */
+export function Restore(name: string): $CancellablePromise<void> {
+    return $Call.ByID(1726711855, name);
+}
+
+/**
  * Switch 执行切换（备份 → 退出客户端 → 写入登录位 → 重启客户端）。
  * 同步执行；每步进度经 clientswitch:progress 事件推送前端。
  */
