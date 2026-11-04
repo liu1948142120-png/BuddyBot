@@ -456,6 +456,8 @@ func (s *Service) ClientSwitchAccount(uid string) error {
 	}
 	switchStep("done", "切换完成，客户端已以 "+acc.Nickname+" 的身份登录")
 	s.Store().Audit("client.switch", uid, "official="+pre.OfficialAuthFile)
+	// 登录文件备份体积小但同样只增不删，成功后一并保留最近 10 份
+	pruneOldest(s.clientSwitchBackupDir(), "backup-*.info", 10)
 	return nil
 }
 

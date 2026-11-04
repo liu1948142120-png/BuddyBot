@@ -945,6 +945,11 @@ func (g *Gateway) chargeAndTouch(auth authInfo, account Account, model string, t
 		st.FailStreak = 0
 		st.TokensSinceSync += tokens
 	})
+	// 近实时余额：请求已消耗上游积分，触发防抖的后台余额查询，
+	// 面板余额不再等到下一次定时巡检才更新（2026-11-05 用户反馈）。
+	if sched := g.svc.Scheduler(); sched != nil {
+		sched.RequestBalanceRefresh(account.UID)
+	}
 	_ = latency
 }
 

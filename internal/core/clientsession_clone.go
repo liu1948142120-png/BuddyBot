@@ -1,10 +1,13 @@
 package core
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -122,6 +125,25 @@ func (s *Service) cloneClientSessions(fromUID, toUID string) (int, error) {
 	return cloneClientSessionsAt(workbuddyRoot(), s.clientSwitchBackupDir(), fromUID, toUID)
 }
 
+// sessionFingerprint 会话正文指纹：正文里唯一随克隆变化的是会话自身 id
+//（copyProjectJSONL 只做 id→新 id 的全量替换，消息级 id 原样保留），
+// 把自身 id 全部去掉后取 sha256，同一会话的所有克隆指纹相同。
+// 用于克隆去重：目标账号已有同指纹会话就不再复制（来回切换不再滚雪球，
+// 也能识别本功能上线前产生的旧副本）。读不到正文返回 ""（按可克隆处理）。
+func sessionFingerprint(root, cid string) string {
+	src, ok := findProjectJSONL(root, cid)
+	if !ok {
+		return ""
+	}
+	raw, err := os.ReadFile(src)
+	if err != nil {
+		return ""
+	}
+	stripped := strings.ReplaceAll(string(raw), cid, "")
+	sum := sha256.Sum256([]byte(stripped))
+	return hex.EncodeToString(sum[:])
+}
+
 // cloneClientSessionsAt 克隆实现（数据根参数化，便于用临时目录做单测）。
 func cloneClientSessionsAt(root, backupDir, fromUID, toUID string) (int, error) {
 	if fromUID == "" || toUID == "" || fromUID == toUID {
@@ -181,10 +203,33 @@ func cloneClientSessionsAt(root, backupDir, fromUID, toUID string) (int, error) 
 	}
 	rows.Close()
 
+	// 目标账号已有本地会话的正文指纹集合：克隆前先比对，目标已有同内容
+	// 会话（无论原版还是历史克隆）就跳过——否则来回切换会把克隆再克隆，
+	// 会话列表按切换次数滚雪球（2026-11-05 用户实测：切 5 次同一对话 5 份）。
+	targetFPs := map[string]struct{}{}
+	if trows, terr := db.Query(
+		`SELECT `+selectCols+` FROM sessions WHERE user_id = ? AND transport = 'local'`, toUID); terr == nil {
+		for trows.Next() {
+			var tid, tcwd string
+			if trows.Scan(&tid, &tcwd) == nil && tid != "" && !isClawWorkspace(tcwd) {
+				if fp := sessionFingerprint(root, tid); fp != "" {
+					targetFPs[fp] = struct{}{}
+				}
+			}
+		}
+		trows.Close()
+	}
+
 	copied := 0
 	for _, it := range list {
 		if it.id == "" || isClawWorkspace(it.cwd) {
 			continue
+		}
+		fp := sessionFingerprint(root, it.id)
+		if fp != "" {
+			if _, dup := targetFPs[fp]; dup {
+				continue // 目标账号已有同内容会话：跳过
+			}
 		}
 		newCID := uuid.NewString() // 必须带连字符的 UUID：官方只认这个格式
 		copyProjectJSONL(root, it.id, newCID)
@@ -195,10 +240,33 @@ func cloneClientSessionsAt(root, backupDir, fromUID, toUID string) (int, error) 
 		if !ok {
 			continue // 源行在查询后被删：跳过
 		}
+		if fp != "" {
+			targetFPs[fp] = struct{}{} // 同批内多份同内容源也只克隆一次
+		}
 		registerEdgeSyncMapping(root, newCID, toUID) // 云端归属失败不致命
 		copied++
 	}
+	pruneSwitchSnapshots(backupDir)
 	return copied, nil
+}
+
+// pruneSwitchSnapshots 切换备份保留策略：sessions-*.db 只留最近 5 份。
+// 快照是防切坏的安全网，但每次切换都写一份完整库快照只增不删（实测 5 次切换
+// 攒 34MB）。成功路径末尾调用，失败时不清（快照可用于人工还原）。
+func pruneSwitchSnapshots(backupDir string) {
+	pruneOldest(backupDir, "sessions-*.db", 5)
+}
+
+// pruneOldest 按 glob 收集文件、按名字倒序（名字含时间戳）保留最新 keep 个，其余删除。
+func pruneOldest(dir, pattern string, keep int) {
+	matches, err := filepath.Glob(filepath.Join(dir, pattern))
+	if err != nil || len(matches) <= keep {
+		return
+	}
+	sort.Strings(matches) // 时间戳文件名：字典序即时间序
+	for _, p := range matches[:len(matches)-keep] {
+		_ = os.Remove(p)
+	}
 }
 
 // copyProjectJSONL 复制会话正文到新 id 同名文件，正文里的旧 id 引用一并替换。

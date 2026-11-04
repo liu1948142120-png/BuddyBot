@@ -288,12 +288,22 @@ func newSessionTestRoot(t *testing.T) (root string) {
 		{"s-a3", "/Users/me/work", "uid-a", "cloud"},             // 云端会话归服务端
 		{"s-b1", "/Users/me/work", "uid-b", "local"},
 	}
+	// 每条会话的正文必须含 id 之外的独立内容：克隆去重按「去掉自身 id 后的
+	// 正文指纹」判重，仅靠 id 区分的退化正文会让所有会话指纹相同（那是
+	// 克隆副本的特征，不是真实会话的特征）。
+	bodies := map[string]string{
+		"s-a1":   "项目排期会议纪要",
+		"s-a2":   "本周周报草稿",
+		"s-claw": "IM 渠道绑定",
+		"s-a3":   "云端对话占位",
+		"s-b1":   "周末购物清单",
+	}
 	for _, r := range rows {
 		if _, err := db.Exec(`INSERT INTO sessions(id, cwd, user_id, transport, created_at, updated_at)
 			VALUES(?,?,?,?,1000,2000)`, r.id, r.cwd, r.uid, r.transport); err != nil {
 			t.Fatalf("插数据失败: %v", err)
 		}
-		body := `{"sessionId":"` + r.id + `","role":"user","text":"hi ` + r.id + `"}`
+		body := `{"sessionId":"` + r.id + `","role":"user","text":"` + bodies[r.id] + `"}`
 		if err := os.WriteFile(filepath.Join(ws, r.id+".jsonl"), []byte(body), 0o600); err != nil {
 			t.Fatalf("写正文失败: %v", err)
 		}

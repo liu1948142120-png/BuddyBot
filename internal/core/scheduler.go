@@ -89,6 +89,8 @@ type Scheduler struct {
 	adoptTried map[string]string // uid → 当日已判定领养门槛未达（CST 日期）
 	lastRefresh time.Time        // 定时刷新：上次执行时刻（零值 = 尚未执行）
 	creditNotified map[string]string // uid → 最近一次积分预警通知的标记（CST 日期，防重复提醒）
+	balanceReq   map[string]bool     // uid → 近实时余额刷新待执行标记（合并突发请求）
+	balanceLast  map[string]time.Time // uid → 上次近实时余额查询时刻（防抖）
 }
 
 const maxHistory = 20
@@ -111,6 +113,8 @@ func NewScheduler(svc *Service) *Scheduler {
 		history:    []TaskRun{},
 		adoptTried: map[string]string{},
 		creditNotified: map[string]string{},
+		balanceReq:  map[string]bool{},
+		balanceLast: map[string]time.Time{},
 	}
 }
 
@@ -950,6 +954,46 @@ func (s *Scheduler) RefreshBalanceNow(uid string) (Account, error) {
 	s.svc.Store().ClearRelogin(uid)
 	acc, _ := s.svc.FindAccount(uid)
 	return acc, nil
+}
+
+// balanceRefreshMinInterval 近实时余额刷新的最小间隔（每账号）：网关高频请求下
+// 不能每笔都查一次上游余额接口，防抖到每分钟至多一次。
+const balanceRefreshMinInterval = time.Minute
+
+// RequestBalanceRefresh 网关请求记账后的近实时余额刷新入口（fire-and-forget）。
+//
+// 面板余额此前只在定时巡检/手动查询时更新，网关持续消耗期间显示值严重滞后
+// （实测客户端剩 500+ 面板仍显示 1000+）。这里带两级防抖：
+//  1. 每账号至多 1 次/分钟（balanceLast）；
+//  2. 突发请求合并——已有待执行查询时后续请求直接返回（balanceReq）；
+//  3. 延迟 5s 再查，等上游记账落定，避免查到扣费前的旧值。
+func (s *Scheduler) RequestBalanceRefresh(uid string) {
+	if uid == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.balanceReq[uid] {
+		s.mu.Unlock()
+		return
+	}
+	if !s.balanceLast[uid].IsZero() && time.Since(s.balanceLast[uid]) < balanceRefreshMinInterval {
+		s.mu.Unlock()
+		return
+	}
+	s.balanceReq[uid] = true
+	s.mu.Unlock()
+
+	go func() {
+		time.Sleep(5 * time.Second) // 等上游记账落定
+		s.mu.Lock()
+		s.balanceReq[uid] = false
+		s.balanceLast[uid] = time.Now()
+		s.mu.Unlock()
+		if _, err := s.RefreshBalanceNow(uid); err != nil {
+			// 静默失败：近实时刷新是尽力而为，定时巡检仍会兜底
+			return
+		}
+	}()
 }
 
 // refreshModels 拉取上游动态模型目录并入本地清单（本地种子表兜底，动态条目覆盖
